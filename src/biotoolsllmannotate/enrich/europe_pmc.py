@@ -4,6 +4,13 @@ from collections.abc import Iterable
 from typing import Any, Dict
 
 import requests
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 BASE_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 BASE_FULLTEXT_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
@@ -33,6 +40,30 @@ def enrich_candidates_with_europe_pmc(
         return
 
     http = session or requests
+
+    if not isinstance(candidates, list):
+        candidates = list(candidates)
+
+    progress: Progress | None = None
+    task_id: int | None = None
+    if logger and candidates:
+        try:
+            logger.info(
+                "🔎 Fetching publication metadata from Europe PMC for %d candidates",
+                len(candidates),
+            )
+            progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeElapsedColumn(),
+                transient=True,
+            )
+            progress.start()
+            task_id = progress.add_task("Europe PMC", total=len(candidates))
+        except Exception:
+            progress = None
     timeout = config.get("timeout", 15)
     include_full_text = config.get("include_full_text", False)
     max_full_text_chars = config.get("max_full_text_chars", 4000)
@@ -118,6 +149,12 @@ def enrich_candidates_with_europe_pmc(
                 "Europe PMC enrichment added data for candidate '%s'",
                 candidate.get("title") or candidate.get("name") or "<unknown>",
             )
+
+        if progress and task_id is not None:
+            progress.update(task_id, advance=1)
+
+    if progress:
+        progress.stop()
 
 
 def _extract_publications(candidate: dict[str, Any]) -> list[dict[str, Any]]:
