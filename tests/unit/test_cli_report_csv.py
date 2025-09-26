@@ -101,7 +101,7 @@ def test_execute_run_emits_csv_with_identifiers(tmp_path, monkeypatch):
         model="llama3.2",
         concurrency=1,
         input_path=str(input_path),
-        offline=True,
+        offline=False,
     )
 
     csv_path = report_path.with_suffix(".csv")
@@ -154,7 +154,7 @@ def test_execute_run_writes_updated_entries_file(tmp_path, monkeypatch):
         model="llama3.2",
         concurrency=1,
         input_path=str(input_path),
-        offline=True,
+        offline=False,
         show_progress=False,
     )
 

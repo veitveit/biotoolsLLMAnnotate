@@ -31,8 +31,7 @@ def raise_exit() -> None:
     raise typer.Exit(code=0)
 
 
-@app.command("run")
-def run(
+def _run_impl(
     version: bool = typer.Option(  # noqa: D401 - short help by design
         False,
         "--version",
@@ -63,6 +62,11 @@ def run(
         None,
         "--from-date",
         help="Start date for Pub2Tools fetching (YYYY-MM-DD).",
+    ),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Relative window (e.g. 7d, 30d) overriding --from-date",
     ),
     to_date: str | None = typer.Option(
         None,
@@ -129,7 +133,7 @@ def run(
         "--config",
         help="Path to config YAML file (default: config.yaml in project root).",
     ),
-) -> None:
+    ) -> None:
     """Run the annotation pipeline.
 
     Examples:
@@ -155,6 +159,8 @@ def run(
 
     # Use config defaults for optional parameters that weren't explicitly set
     # Note: CLI args take precedence over config values
+    if since is not None:
+        from_date = since
     if model is None:
         model = config.get("pipeline", {}).get("model")
     if output == Path("out/payload.json"):
@@ -240,6 +246,9 @@ def run(
         typer.echo(str(e), err=True)
         typer.echo(traceback.format_exc(), err=True)
         sys.exit(3)
+
+
+run = app.command("run")(_run_impl)
 
 
 def main():

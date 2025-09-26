@@ -596,48 +596,85 @@ def execute_run(
     logger.info(
         f"🧠 Scoring {len(candidates)} candidates using {model or 'default'} model..."
     )
-    from biotoolsllmannotate.assess.scorer import Scorer
-
-    scorer = Scorer(model=model, config=config_data)
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     progress: Progress | None = None
     task_id: int | None = None
 
-    def score_one(c):
-        urls = [str(u) for u in (c.get("urls") or [])]
-        homepage = c.get("homepage") or primary_homepage(urls) or ""
-        publication_ids = _publication_identifiers(c)
-        if publication_ids:
-            c.setdefault("publication_ids", publication_ids)
-        candidate_id = (
-            c.get("id")
-            or c.get("tool_id")
-            or c.get("biotools_id")
-            or c.get("biotoolsID")
-            or c.get("identifier")
-            or ""
-        )
-        title = (
-            c.get("title")
-            or c.get("name")
-            or c.get("tool_title")
-            or c.get("display_title")
-            or ""
-        )
-        scores = scorer.score_candidate(c)
-        include = include_candidate(
-            scores, min_score=min_score, has_homepage=bool(homepage)
-        )
-        decision = {
-            "id": str(candidate_id),
-            "title": str(title),
-            "homepage": homepage,
-            "publication_ids": publication_ids,
-            "scores": scores,
-            "include": include,
-        }
-        return (decision, c, homepage, include)
+    if offline:
+        def score_one(c):
+            urls = [str(u) for u in (c.get("urls") or [])]
+            homepage = c.get("homepage") or primary_homepage(urls) or ""
+            publication_ids = _publication_identifiers(c)
+            if publication_ids:
+                c.setdefault("publication_ids", publication_ids)
+            candidate_id = (
+                c.get("id")
+                or c.get("tool_id")
+                or c.get("biotools_id")
+                or c.get("biotoolsID")
+                or c.get("identifier")
+                or ""
+            )
+            title = (
+                c.get("title")
+                or c.get("name")
+                or c.get("tool_title")
+                or c.get("display_title")
+                or ""
+            )
+            scores = simple_scores(c)
+            include = include_candidate(
+                scores, min_score=min_score, has_homepage=bool(homepage)
+            )
+            decision = {
+                "id": str(candidate_id),
+                "title": str(title),
+                "homepage": homepage,
+                "publication_ids": publication_ids,
+                "scores": scores,
+                "include": include,
+            }
+            return (decision, c, homepage, include)
+    else:
+        from biotoolsllmannotate.assess.scorer import Scorer
+
+        scorer = Scorer(model=model, config=config_data)
+
+        def score_one(c):
+            urls = [str(u) for u in (c.get("urls") or [])]
+            homepage = c.get("homepage") or primary_homepage(urls) or ""
+            publication_ids = _publication_identifiers(c)
+            if publication_ids:
+                c.setdefault("publication_ids", publication_ids)
+            candidate_id = (
+                c.get("id")
+                or c.get("tool_id")
+                or c.get("biotools_id")
+                or c.get("biotoolsID")
+                or c.get("identifier")
+                or ""
+            )
+            title = (
+                c.get("title")
+                or c.get("name")
+                or c.get("tool_title")
+                or c.get("display_title")
+                or ""
+            )
+            scores = scorer.score_candidate(c)
+            include = include_candidate(
+                scores, min_score=min_score, has_homepage=bool(homepage)
+            )
+            decision = {
+                "id": str(candidate_id),
+                "title": str(title),
+                "homepage": homepage,
+                "publication_ids": publication_ids,
+                "scores": scores,
+                "include": include,
+            }
+            return (decision, c, homepage, include)
 
     try:
         if show_progress and candidates:

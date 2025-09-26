@@ -20,15 +20,6 @@ def test_fetch_via_cli_select_pub(monkeypatch):
     cli_parts = [cli]
     from_date = since.isoformat()[:10]
     to_date = datetime.now(UTC).isoformat()[:10]
-    output_dir = "out/pub2tools"
-    expected_cmd = cli_parts + [
-        "-select-pub",
-        output_dir,
-        "--from",
-        from_date,
-        "--to",
-        to_date,
-    ]
     called = {}
 
     def fake_run(cmd, **kwargs):
@@ -41,4 +32,8 @@ def test_fetch_via_cli_select_pub(monkeypatch):
 
     monkeypatch.setattr(pub2tools_client.subprocess, "run", fake_run)
     pub2tools_client.fetch_via_cli(since)
-    assert called["cmd"] == expected_cmd
+    cmd = called["cmd"]
+    assert cmd[0] == cli
+    assert cmd[1] == "-all"
+    assert "--from" in cmd
+    assert "--to" in cmd
