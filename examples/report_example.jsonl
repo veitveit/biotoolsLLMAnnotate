@@ -1,0 +1,1 @@
+{"id": "c1", "title": "GeneAnnotator", "homepage": "https://example.org/geneannotator", "scores": {"bio_score": 0.8, "documentation_score": 0.8, "concise_description": "Short rewritten summary.", "rationale": "heuristic pre-LLM scoring"}, "include": true, "evidence": ["homepage", "documentation"]}

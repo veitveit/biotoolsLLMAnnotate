@@ -1,0 +1,13 @@
+[
+  {
+    "name": "GeneAnnotator",
+    "description": "Annotates genomes with example methods.",
+    "homepage": "https://example.org/geneannotator",
+    "topic": ["http://edamontology.org/topic_0121"],
+    "operation": ["http://edamontology.org/operation_0361"],
+    "data": ["http://edamontology.org/data_2044"],
+    "documentation": ["https://docs.example.org/geneannotator"],
+    "sourceCode": "https://github.com/org/geneannotator"
+  }
+]
+

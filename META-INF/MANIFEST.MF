@@ -1,0 +1,65 @@
+Manifest-Version: 1.0
+Created-By: Maven JAR Plugin 3.3.0
+Build-Jdk-Spec: 21
+Class-Path: pub2tools-core-1.1.2-SNAPSHOT.jar lib/pubfetcher-core-1.1.2-
+ SNAPSHOT.jar lib/jsoup-1.16.1.jar lib/snakeyaml-2.2.jar lib/pdfbox-3.0.
+ 0.jar lib/pdfbox-io-3.0.0.jar lib/fontbox-3.0.0.jar lib/commons-logging
+ -1.2.jar lib/xmpbox-3.0.0.jar lib/bcprov-jdk18on-1.76.jar lib/mapdb-3.0
+ .10.jar lib/kotlin-stdlib-1.2.71.jar lib/kotlin-stdlib-common-1.2.71.ja
+ r lib/annotations-13.0.jar lib/eclipse-collections-api-10.4.0.jar lib/e
+ clipse-collections-10.4.0.jar lib/eclipse-collections-forkjoin-10.4.0.j
+ ar lib/guava-33.5.0-jre.jar lib/failureaccess-1.0.3.jar lib/listenablef
+ uture-9999.0-empty-to-avoid-conflict-with-guava.jar lib/jspecify-1.0.0.
+ jar lib/error_prone_annotations-2.41.0.jar lib/j2objc-annotations-3.1.j
+ ar lib/lz4-1.3.0.jar lib/elsa-3.0.0-M5.jar lib/jackson-databind-2.15.2.
+ jar lib/jackson-annotations-2.15.2.jar lib/jackson-core-2.15.2.jar lib/
+ htmlunit-2.70.0.jar lib/httpmime-4.5.14.jar lib/httpclient-4.5.14.jar l
+ ib/httpcore-4.4.16.jar lib/htmlunit-core-js-2.70.0.jar lib/neko-htmluni
+ t-2.70.0.jar lib/htmlunit-cssparser-1.14.0.jar lib/htmlunit-xpath-2.70.
+ 0.jar lib/commons-lang3-3.12.0.jar lib/commons-text-1.10.0.jar lib/comm
+ ons-io-2.10.0.jar lib/commons-net-3.9.0.jar lib/commons-codec-1.15.jar 
+ lib/dec-0.1.2.jar lib/salvation2-3.0.1.jar lib/websocket-client-9.4.50.
+ v20221201.jar lib/jetty-client-9.4.50.v20221201.jar lib/jetty-http-9.4.
+ 50.v20221201.jar lib/jetty-util-9.4.50.v20221201.jar lib/jetty-io-9.4.5
+ 0.v20221201.jar lib/websocket-common-9.4.50.v20221201.jar lib/websocket
+ -api-9.4.50.v20221201.jar lib/selenium-firefox-driver-4.16.1.jar lib/au
+ to-service-annotations-1.1.1.jar lib/selenium-api-4.16.1.jar lib/seleni
+ um-devtools-v85-4.16.1.jar lib/selenium-http-4.16.1.jar lib/failsafe-3.
+ 3.2.jar lib/selenium-json-4.16.1.jar lib/selenium-manager-4.16.1.jar li
+ b/selenium-os-4.16.1.jar lib/commons-exec-1.3.jar lib/selenium-remote-d
+ river-4.16.1.jar lib/opentelemetry-api-1.28.0.jar lib/opentelemetry-con
+ text-1.28.0.jar lib/opentelemetry-exporter-logging-1.28.0.jar lib/opent
+ elemetry-sdk-metrics-1.28.0.jar lib/opentelemetry-extension-incubator-1
+ .28.0-alpha.jar lib/opentelemetry-sdk-logs-1.28.0.jar lib/opentelemetry
+ -sdk-common-1.28.0.jar lib/opentelemetry-sdk-extension-autoconfigure-sp
+ i-1.28.0.jar lib/opentelemetry-sdk-extension-autoconfigure-1.28.0.jar l
+ ib/opentelemetry-api-events-1.28.0-alpha.jar lib/opentelemetry-sdk-trac
+ e-1.28.0.jar lib/opentelemetry-sdk-1.28.0.jar lib/opentelemetry-semconv
+ -1.28.0-alpha.jar lib/selenium-support-4.16.1.jar lib/byte-buddy-1.14.5
+ .jar lib/edammap-core-1.1.2-SNAPSHOT.jar lib/owlapi-distribution-5.5.0.
+ jar lib/owlapi-compatibility-5.5.0.jar lib/owlapi-apibinding-5.5.0.jar 
+ lib/owlapi-api-5.5.0.jar lib/javax.inject-1.jar lib/owlapi-impl-5.5.0.j
+ ar lib/owlapi-parsers-5.5.0.jar lib/owlapi-oboformat-5.5.0.jar lib/owla
+ pi-tools-5.5.0.jar lib/owlapi-rio-5.5.0.jar lib/commons-rdf-api-0.5.0.j
+ ar lib/xz-1.9.jar lib/jcl-over-slf4j-1.7.30.jar lib/rdf4j-model-4.2.0.j
+ ar lib/rdf4j-common-exception-4.2.0.jar lib/rdf4j-common-text-4.2.0.jar
+  lib/rdf4j-common-io-4.2.0.jar lib/rdf4j-common-iterator-4.2.0.jar lib/
+ rdf4j-model-api-4.2.0.jar lib/rdf4j-common-annotation-4.2.0.jar lib/rdf
+ 4j-model-vocabulary-4.2.0.jar lib/rdf4j-rio-api-4.2.0.jar lib/rdf4j-com
+ mon-xml-4.2.0.jar lib/rdf4j-rio-languages-4.2.0.jar lib/rdf4j-rio-datat
+ ypes-4.2.0.jar lib/rdf4j-rio-binary-4.2.0.jar lib/rdf4j-rio-n3-4.2.0.ja
+ r lib/rdf4j-rio-nquads-4.2.0.jar lib/rdf4j-rio-ntriples-4.2.0.jar lib/r
+ df4j-rio-rdfjson-4.2.0.jar lib/rdf4j-rio-jsonld-4.2.0.jar lib/httpclien
+ t-cache-4.5.13.jar lib/rdf4j-rio-rdfxml-4.2.0.jar lib/rdf4j-rio-trix-4.
+ 2.0.jar lib/rdf4j-rio-turtle-4.2.0.jar lib/rdf4j-rio-trig-4.2.0.jar lib
+ /rdf4j-rio-hdt-4.2.0.jar lib/rdf4j-common-util-4.2.0.jar lib/jsonld-jav
+ a-0.13.4.jar lib/httpclient-osgi-4.5.13.jar lib/fluent-hc-4.5.13.jar li
+ b/httpcore-osgi-4.4.14.jar lib/httpcore-nio-4.4.14.jar lib/hppcrt-0.7.5
+ .jar lib/caffeine-3.1.1.jar lib/checker-qual-3.22.0.jar lib/jsr305-3.0.
+ 2.jar lib/univocity-parsers-2.9.1.jar lib/hppc-0.9.1.jar lib/pub2tools-
+ core-1.1.2-SNAPSHOT.jar lib/pubfetcher-cli-1.1.2-SNAPSHOT.jar lib/edamm
+ ap-cli-1.1.2-SNAPSHOT.jar lib/jcommander-1.82.jar lib/log4j-api-2.20.0.
+ jar lib/log4j-core-2.20.0.jar lib/slf4j-simple-2.0.9.jar lib/slf4j-api-
+ 2.0.9.jar
+Main-Class: tools.bio.pub2tools.cli.Pub2Tools
+

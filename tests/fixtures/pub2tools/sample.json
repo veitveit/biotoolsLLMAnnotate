@@ -1,0 +1,22 @@
+[
+  {
+    "id": "c1",
+    "title": "GeneAnnotator",
+    "description": "A genome annotation tool",
+    "urls": [
+      "https://example.org/geneannotator",
+      "https://docs.example.org/geneannotator"
+    ],
+    "published_at": "2025-09-15T00:00:00Z",
+    "tags": ["genomics", "annotation"]
+  },
+  {
+    "id": "c2",
+    "title": "NotBioApp",
+    "description": "A social app unrelated to bioinformatics",
+    "urls": ["https://notbio.example.com"],
+    "published_at": "2025-08-01T00:00:00Z",
+    "tags": ["social"]
+  }
+]
+

@@ -1,0 +1,2 @@
+[console_scripts]
+biotools-annotate = biotoolsllmannotate.cli.main:main

@@ -1,0 +1,92 @@
+pub2tools:
+  edam_owl: http://edamontology.org/EDAM.owl
+  idf: https://github.com/edamontology/edammap/raw/master/doc/biotools.idf
+  idf_stemmed: https://github.com/edamontology/edammap/raw/master/doc/biotools.stemmed.idf
+  from_date: "2025-01-01"
+  to_date: "2025-09-20"
+  firefox_path: null
+  p2t_cli: bin/pub2tools
+  custom_restriction: SRC:MED OR SRC:PMC
+  disable_tool_restriction: true
+  timeout: 6000
+  retryLimit: 0
+  fetcher_threads: 4
+  to_biotools_file: null
+pipeline:
+  from_date: 2024-07-01
+  to_date: 2024-07-31
+  min_score: 0.6
+  limit: null
+  dry_run: false
+  output: out/payload.json
+  report: out/report.jsonl
+  model: llama3.2
+  concurrency: 8
+  input_path: null
+  offline: false
+  updated_entries: out/updated_entries.json
+  payload_version: 0.8.1
+ollama:
+  host: http://localhost:11434
+logging:
+  level: INFO
+  file: null
+enrichment:
+  europe_pmc:
+    enabled: true
+    include_full_text: true
+    max_publications: 1
+    max_full_text_chars: 12000
+    timeout: 15
+scoring_prompt_template: 'Please evaluate this bioinformatics tool candidate for inclusion
+  in bio.tools.
+
+
+  Tool Information:
+
+  - Title: {title}
+
+  - Description: {description}
+
+  - Homepage: {homepage}
+
+  - Documentation: {documentation}
+
+  - Repository: {repository}
+
+  - Tags: {tags}
+
+  - Published: {published_at}
+
+  - Publication Abstract: {publication_abstract}
+
+  - Publication Full Text: {publication_full_text}
+
+
+  Please provide a JSON response with:
+
+  - tool_name: The most appropriate display name for the tool (derive from the context
+  if missing).
+
+  - homepage: The best homepage URL for the tool (choose from the provided URLs if
+  necessary).
+
+  - publication_ids: A list of identifiers (e.g., PMID:xxxx, PMCID:xxxx, DOI:xxxx)
+  relevant to the tool.
+
+  - bio_score: A score from 0.0 to 1.0 indicating whether this is a bioinformatics
+  tool or resource.
+
+  - documentation_score: A score from 0.0 to 1.0 capturing if the available documentation
+  makes the tool usable.
+
+  - concise_description: A refined 1-2 sentence summary of the tool (avoid copying
+  verbatim unless already concise).
+
+  - rationale: A brief explanation referencing evidence for your scores.
+
+
+  Respond ONLY with the JSON object. Response format: {{"tool_name": "Example Tool",
+  "homepage": "https://example.org", "publication_ids": ["pmid:12345"], "bio_score":
+  0.8, "documentation_score": 0.9, "concise_description": "Short rewritten summary.",
+  "rationale": "This is a bioinformatics tool..."}}'

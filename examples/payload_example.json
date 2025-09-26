@@ -1,0 +1,33 @@
+[
+    {
+        "name": "GeneAnnotator",
+        "description": "A genome annotation tool",
+        "homepage": "https://example.org/geneannotator",
+        "topic": [
+            {
+                "term": "genomics",
+                "uri": ""
+            },
+            {
+                "term": "annotation",
+                "uri": ""
+            }
+        ],
+        "documentation": [
+            {
+                "url": "https://docs.example.org/geneannotator",
+                "type": [
+                    "Manual"
+                ]
+            }
+        ],
+        "link": [
+            {
+                "url": "https://example.org/geneannotator",
+                "type": [
+                    "Homepage"
+                ]
+            }
+        ]
+    }
+]
