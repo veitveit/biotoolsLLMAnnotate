@@ -38,7 +38,6 @@ class OllamaClient:
                 f"{self.base_url}/api/generate", json=payload, timeout=300
             )
             resp.raise_for_status()
-            self._log_exchange(payload, resp.text)
             combined = ""
             for line in resp.text.strip().splitlines():
                 try:
@@ -51,12 +50,15 @@ class OllamaClient:
                     continue
             match = re.search(r"\{.*?\}", combined, re.DOTALL)
             if match:
+                final_json = match.group(0)
+                self._log_exchange(payload, final_json, is_json=True)
                 return match.group(0)
+            self._log_exchange(payload, combined, is_json=False)
             raise ValueError("No valid JSON object found in Ollama response")
 
         return _call()
 
-    def _log_exchange(self, payload, response_text):
+    def _log_exchange(self, payload, response_text, *, is_json: bool):
         try:
             self.llm_log_path.parent.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now(UTC).isoformat()
@@ -65,11 +67,17 @@ class OllamaClient:
                 f.write(f"timestamp: {timestamp}\n")
                 f.write(json.dumps(payload, ensure_ascii=False, indent=2))
                 f.write("\n---- RESPONSE\n")
-                f.write(
-                    response_text
-                    if response_text.endswith("\n")
-                    else response_text + "\n"
-                )
+                if is_json:
+                    try:
+                        parsed = json.loads(response_text)
+                        pretty = json.dumps(parsed, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pretty = response_text
+                else:
+                    pretty = response_text
+                if not pretty.endswith("\n"):
+                    pretty += "\n"
+                f.write(pretty)
                 f.write("==== END OLLAMA REQUEST\n\n")
         except Exception:
             pass
