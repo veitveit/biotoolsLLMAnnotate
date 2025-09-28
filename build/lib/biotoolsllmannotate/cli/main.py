@@ -6,7 +6,7 @@ from pathlib import Path
 from .. import __version__
 
 app = typer.Typer(
-    help="CLI to fetch Pub2Tools candidates, LLM‑assess, and emit bio.tools annotations.\n\nExamples:\n  python -m biotoolsllmannotate --from-date 2023-01-01 --to-date 2023-01-31 --min-score 0.6 --output out/payload.json --report out/report.jsonl\n  python -m biotoolsllmannotate --input tests/fixtures/pub2tools/sample.json --dry-run --report out/report.jsonl\n  python -m biotoolsllmannotate --offline --quiet\n  python -m biotoolsllmannotate --help\n\nNote: For faster fetching, configure EuropePMC-only mode in config.yaml or via environment variables.\nTip: Point pipeline.input_path or pub2tools.to_biotools_file at any Pub2Tools export JSON to skip invoking the CLI.",
+    help="CLI to fetch Pub2Tools candidates, enrich, score, and emit bio.tools annotations with a live Rich scoreboard.\n\nExamples:\n  python -m biotoolsllmannotate --from-date 2024-01-01 --to-date 2024-01-31 --min-score 0.6 --output out/exports/biotools_payload.json --report out/reports/assessment.jsonl\n  python -m biotoolsllmannotate --input tests/fixtures/pub2tools/sample.json --dry-run --report out/reports/assessment.jsonl\n  python -m biotoolsllmannotate --write-default-config  # scaffold config.yaml with presets\n  python -m biotoolsllmannotate --offline --quiet\n\nTip: Point pipeline.input_path or pub2tools.to_biotools_file at any Pub2Tools export JSON to skip invoking the CLI when iterating on scoring.",
     add_completion=False,
 )
 
@@ -31,8 +31,7 @@ def raise_exit() -> None:
     raise typer.Exit(code=0)
 
 
-@app.command("run")
-def run(
+def _run_impl(
     version: bool = typer.Option(  # noqa: D401 - short help by design
         False,
         "--version",
@@ -83,19 +82,29 @@ def run(
         False, "--dry-run", help="Assess and report only; do not write payload."
     ),
     output: Path = typer.Option(
-        Path("out/payload.json"),
+        Path("out/exports/biotools_payload.json"),
         "--output",
         help="Output path for biotoolsSchema payload JSON.",
     ),
     report: Path = typer.Option(
-        Path("out/report.jsonl"),
+        Path("out/reports/assessment.jsonl"),
         "--report",
         help="Output path for per-candidate JSONL report.",
     ),
     updated_entries: Path = typer.Option(
-        Path("out/updated_entries.json"),
+        Path("out/exports/biotools_entries.json"),
         "--updated-entries",
         help="Output path for full bio.tools entries JSON payload.",
+    ),
+    enriched_cache: Path | None = typer.Option(
+        None,
+        "--enriched-cache",
+        help="Path to write/read enriched candidates (.json.gz).",
+    ),
+    resume_from_enriched: bool = typer.Option(
+        False,
+        "--resume-from-enriched",
+        help="Resume pipeline starting from an enriched candidates cache.",
     ),
     model: str | None = typer.Option(
         None, "--model", help="Ollama model name (default from config)."
@@ -133,10 +142,10 @@ def run(
     """Run the annotation pipeline.
 
     Examples:
-      biotools-annotate run --from-date 2023-01-01 --to-date 2023-01-31 --min-score 0.6 --output out/payload.json --report out/report.jsonl
-      biotools-annotate run --input tests/fixtures/pub2tools/sample.json --dry-run --report out/report.jsonl
-      biotools-annotate run --offline --quiet
-      biotools-annotate run --help
+        biotools-annotate run --from-date 2024-01-01 --to-date 2024-01-31 --min-score 0.6 --output out/exports/biotools_payload.json --report out/reports/assessment.jsonl
+        biotools-annotate run --input tests/fixtures/pub2tools/sample.json --dry-run --report out/reports/assessment.jsonl
+        biotools-annotate run --write-default-config
+        biotools-annotate run --offline --quiet
 
     Exit codes:
       0: Success
@@ -149,36 +158,57 @@ def run(
     from ..config import get_config_yaml
 
     # Load config first
-    config = get_config_yaml()
+    config = get_config_yaml(str(config_path) if config_path else None)
+    pub2tools_cfg = config.get("pub2tools", {}) or {}
+    pipeline_cfg = config.get("pipeline", {}) or {}
 
     # Check required parameters
 
     # Use config defaults for optional parameters that weren't explicitly set
     # Note: CLI args take precedence over config values
+    if from_date is None:
+        from_date = pub2tools_cfg.get("from_date")
+    if to_date is None:
+        to_date = pub2tools_cfg.get("to_date")
     if model is None:
-        model = config.get("pipeline", {}).get("model")
-    if output == Path("out/payload.json"):
-        config_output = config.get("pipeline", {}).get("output")
+        model = pipeline_cfg.get("model")
+    if output == Path("out/exports/biotools_payload.json"):
+        config_output = pipeline_cfg.get("output")
         if config_output:
             output = Path(config_output)
-    if report == Path("out/report.jsonl"):
-        config_report = config.get("pipeline", {}).get("report")
+    if report == Path("out/reports/assessment.jsonl"):
+        config_report = pipeline_cfg.get("report")
         if config_report:
             report = Path(config_report)
-    if updated_entries == Path("out/updated_entries.json"):
-        config_updated = config.get("pipeline", {}).get("updated_entries")
+    if updated_entries == Path("out/exports/biotools_entries.json"):
+        config_updated = pipeline_cfg.get("updated_entries")
         if config_updated:
             updated_entries = Path(config_updated)
+    if enriched_cache is None:
+        config_cache = pipeline_cfg.get("enriched_cache")
+        if config_cache:
+            enriched_cache = Path(config_cache)
+    if not resume_from_enriched:
+        config_resume = pipeline_cfg.get("resume_from_enriched")
+        if isinstance(config_resume, bool):
+            resume_from_enriched = config_resume
+        elif isinstance(config_resume, str):
+            resume_from_enriched = config_resume.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
     if concurrency == 8:
-        config_concurrency = config.get("pipeline", {}).get("concurrency")
+        config_concurrency = pipeline_cfg.get("concurrency")
         if config_concurrency is not None:
             concurrency = config_concurrency
     if input_path is None:
-        config_input = config.get("pipeline", {}).get("input_path")
+        config_input = pipeline_cfg.get("input_path")
         if config_input:
             input_path = config_input
     if input_path is None:
-        config_to_biotools = config.get("pub2tools", {}).get("to_biotools_file")
+        config_to_biotools = pub2tools_cfg.get("to_biotools_file")
         if config_to_biotools:
             input_path = config_to_biotools
 
@@ -194,21 +224,15 @@ def run(
 
     # Use config defaults for pub2tools parameters that weren't explicitly set
     if edam_owl is None:
-        edam_owl = config.get("pub2tools", {}).get("edam_owl")
+        edam_owl = pub2tools_cfg.get("edam_owl")
     if idf is None:
-        idf = config.get("pub2tools", {}).get("idf")
+        idf = pub2tools_cfg.get("idf")
     if idf_stemmed is None:
-        idf_stemmed = config.get("pub2tools", {}).get("idf_stemmed")
+        idf_stemmed = pub2tools_cfg.get("idf_stemmed")
     if firefox_path is None:
-        firefox_path = config.get("pub2tools", {}).get("firefox_path")
+        firefox_path = pub2tools_cfg.get("firefox_path")
     if p2t_cli is None:
-        p2t_cli = config.get("pub2tools", {}).get("p2t_cli")
-    if from_date is None:
-        from_date = config.get("pub2tools", {}).get("from_date")
-    if to_date is None:
-        to_date = config.get("pub2tools", {}).get("to_date")
-    if to_date is None:
-        to_date = config.get("pipeline", {}).get("to_date")
+        p2t_cli = pub2tools_cfg.get("p2t_cli")
 
     try:
         execute_run(
@@ -231,6 +255,8 @@ def run(
             show_progress=not quiet,
             config_data=config,
             updated_entries=updated_entries,
+            enriched_cache=enriched_cache,
+            resume_from_enriched=resume_from_enriched,
         )
     except Exception as e:
         import traceback
@@ -240,6 +266,9 @@ def run(
         typer.echo(str(e), err=True)
         typer.echo(traceback.format_exc(), err=True)
         sys.exit(3)
+
+
+run = app.command("run")(_run_impl)
 
 
 def main():

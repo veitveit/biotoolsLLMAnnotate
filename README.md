@@ -8,8 +8,8 @@ A modular CLI pipeline for annotating bio.tools entries using Pub2Tools, enrichm
 - Assess bioinformatics relevance and documentation quality using an Ollama LLM
 - Deduplicate, score, and filter candidates
 - Output strict biotoolsSchema JSON payload and per-candidate report
-- Advanced CLI flags: batching, concurrency, quiet/verbose, offline mode
-- Robust error handling, validation gate, and progress logging
+- Advanced CLI flags: batching, concurrency, quiet/verbose, offline mode, default config scaffolding
+- Robust error handling, validation gate, and progress logging with a live Rich scoreboard
 - Built-in Pub2Tools wrapper with automatic classpath management
 - Timeout protection for long-running operations
 - Rich progress bars for better user experience
@@ -21,6 +21,8 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
 ollama pull llama3.2  # if using LLM assessment
+# Optional: scaffold config.yaml with project defaults
+python -m biotoolsllmannotate --write-default-config
 ```
 
 ### Pub2Tools Integration
@@ -137,10 +139,10 @@ python -m biotoolsllmannotate --offline --dry-run
 ## Example Usage
 ```bash
 # Fetch recent candidates and assess them
-python -m biotoolsllmannotate --from-date 7d --min-score 0.6 --output out/payload.json --report out/report.jsonl
+python -m biotoolsllmannotate --from-date 7d --min-score 0.6 --output out/exports/biotools_payload.json --report out/reports/assessment.jsonl
 
 # Test with sample data
-python -m biotoolsllmannotate --input tests/fixtures/pub2tools/sample.json --dry-run --report out/report.jsonl
+python -m biotoolsllmannotate --input tests/fixtures/pub2tools/sample.json --dry-run --report out/reports/assessment.jsonl
 
 # Reuse an existing Pub2Tools export (no rename needed)
 python -m biotoolsllmannotate --input /path/to/pub2tools_export.json --dry-run
@@ -157,10 +159,13 @@ python -m biotoolsllmannotate --from-date 2023-01-01 --to-date 2023-12-31 --min-
 ```
 
 ## Output Files
-- `out/payload.json`: biotoolsSchema-compliant JSON for upload
-- `out/report.jsonl`: Per-candidate report with bio/documentation scores, rationale, and evidence
-- `out/report.csv`: Spreadsheet-friendly version of the report (`tool_name`, `homepage`, publication IDs, `bio_score`, `documentation_score`, `concise_description`, rationale, origins)
-- `out/updated_entries.json`: Full biotoolsSchema payload for accepted tools, ready for upload/merge
+- `out/exports/biotools_payload.json`: biotoolsSchema-compliant JSON bundle for upload
+- `out/reports/assessment.jsonl`: Per-candidate report with bio/documentation scores, rationale, and evidence
+- `out/reports/assessment.csv`: Spreadsheet-friendly version of the report (`tool_name`, `homepage`, publication IDs, `bio_score`, `documentation_score`, `concise_description`, rationale, origins)
+- `out/exports/biotools_entries.json`: Full biotoolsSchema payload for accepted tools, ready for upload/merge
+- `out/cache/enriched_candidates.json.gz`: Optional cache of enriched candidates (enable with `--enriched-cache`, resume with `--resume-from-enriched`)
+- `out/logs/ollama.log`: Append-only trace of every LLM scoring exchange (created on first LLM call)
+- `out/pub2tools/run_<timestamp>/`: Raw artifacts fetched from Pub2Tools when the CLI wrapper runs
 
 ## LLM Scoring
 - Each candidate receives two scores from the configured Ollama model:
@@ -171,14 +176,25 @@ python -m biotoolsllmannotate --from-date 2023-01-01 --to-date 2023-12-31 --min-
 - `publication_ids`: identifiers (PMID, PMCID, DOI) derived from candidate metadata or Europe PMC
 - `concise_description`: a 1–2 sentence summary the model rewrites if the source text is weak
 - Both scores range from 0.0–1.0 and must exceed `--min-score` (default 0.6) for inclusion.
+- When online, the pipeline scrapes each homepage (respecting timeouts) to capture extra documentation and repository links; these, along with the HTTP status, are included in the prompt.
 - To customise the instructions, edit `scoring_prompt_template` in `config.yaml`; the CLI falls back to the same text bundled in `biotoolsllmannotate.config.DEFAULT_CONFIG_YAML`.
 
 ### Europe PMC Enrichment
+
+### Enrichment Cache
+- Use `--enriched-cache <path>` (or set `pipeline.enriched_cache`) to write a compressed `.json.gz` snapshot of candidates after Europe PMC enrichment.
+- Reuse that snapshot later with `--resume-from-enriched` (or set `pipeline.resume_from_enriched: true`) to skip Pub2Tools fetching and enrichment when iterating on scoring or prompt settings.
+- Example: `python -m biotoolsllmannotate --enriched-cache out/cache/enriched_candidates.json.gz --resume-from-enriched --dry-run`
 - When `enrichment.europe_pmc.enabled` is true (default), the pipeline pulls abstracts and (by default) truncated full text for each candidate publication with a PMID/PMCID/DOI.
 - Disable `enrichment.europe_pmc.include_full_text` if you prefer to skip the full-text fetch or reduce prompt size.
-- The post-processing step writes `out/updated_entries.json`, combining the enriched metadata with the latest LLM inferences.
+- The post-processing step writes `out/exports/biotools_entries.json`, combining the enriched metadata with the latest LLM inferences.
 - Toggle `enrichment.europe_pmc.include_full_text` if you want the prompt to include the open-access body of the article (truncated to `max_full_text_chars`).
 - The enrichment step is skipped automatically in `--offline` mode or when no publication identifiers are present.
+
+## Logging & Health Checks
+- Step logs now carry consistent action tags (`GATHER`, `DEDUP`, `ENRICH`, `SCRAPE`, `SCORE`, `OUTPUT`, `SUMMARY`) so you can skim runs quickly.
+- Before scoring, the CLI pings the configured Ollama endpoint; if the health probe fails, the run switches to heuristic scoring and highlights the failure in the summary line (including a `llm_health_fail` counter).
+- Warning messages suggest retrying with `--offline` or fixing the Ollama service whenever the fallback is triggered.
 
 ## Evidence Policy
 - When uncertain, the pipeline consults website, documentation, and repository metadata

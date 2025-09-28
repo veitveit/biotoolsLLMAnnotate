@@ -29,7 +29,7 @@
 - [ ] T009 [P] Unit test schema models in `tests/unit/test_schema_models.py` (validate BioToolsEntry, clamp scores, required fields)
 ## Phase 3.3: Core Implementation (ONLY after tests are failing)
 [x] T015 Implement CLI entry `src/biotoolsllmannotate/cli/main.py` using Typer; expose console script `biotools-annotate`
-[x] T016 Pipeline orchestrator `src/biotoolsllmannotate/cli/run.py` (args: --since, --min-score, --limit, --dry-run, --output, --report, --model, --concurrency)
+[x] T016 Pipeline orchestrator `src/biotoolsllmannotate/cli/run.py` (args: --from-date, --to-date, --min-score, --limit, --dry-run, --output, --report, --model, --concurrency)
 [x] T017 Ingest: `src/biotoolsllmannotate/ingest/pub2tools_fetcher.py` (parse, filter by time, dedup)
 [x] T017a Ingest: `src/biotoolsllmannotate/ingest/pub2tools_client.py` (locate CLI, `run_month_all`, `load_to_biotools_json`, `fetch_via_cli`)
 [x] T018 Enrich: `src/biotoolsllmannotate/enrich/scraper.py` (requests/httpx + parser; extract homepage/docs/repo; timeouts, robots.txt respect if feasible)

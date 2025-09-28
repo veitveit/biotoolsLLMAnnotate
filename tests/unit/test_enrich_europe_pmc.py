@@ -1,3 +1,5 @@
+import logging
+
 from biotoolsllmannotate.enrich.europe_pmc import (
     enrich_candidates_with_europe_pmc,
     reset_europe_pmc_cache,
@@ -37,13 +39,9 @@ def test_enrich_adds_abstract(monkeypatch):
     def fake_get(url, params=None, timeout=None):
         return next(responses)
 
-    monkeypatch.setattr(
-        "biotoolsllmannotate.enrich.europe_pmc.requests.get", fake_get
-    )
+    monkeypatch.setattr("biotoolsllmannotate.enrich.europe_pmc.requests.get", fake_get)
 
-    candidates = [
-        {"title": "Tool", "publication": [{"PMID": "12345"}]}
-    ]
+    candidates = [{"title": "Tool", "publication": [{"PMID": "12345"}]}]
 
     config = {
         "enabled": True,
@@ -75,16 +73,16 @@ def test_enrich_adds_full_text_when_available(monkeypatch):
                     "pmcid": "PMC1234567",
                     "pmid": "12345",
                     "fullTextUrlList": {
-                        "fullTextUrl": [
-                            {"url": "https://example.org/fulltext.pdf"}
-                        ]
+                        "fullTextUrl": [{"url": "https://example.org/fulltext.pdf"}]
                     },
                 }
             ]
         }
     }
 
-    fulltext_xml = "<article><body><p>This is the full text content.</p></body></article>"
+    fulltext_xml = (
+        "<article><body><p>This is the full text content.</p></body></article>"
+    )
 
     responses = iter(
         [
@@ -96,9 +94,7 @@ def test_enrich_adds_full_text_when_available(monkeypatch):
     def fake_get(url, params=None, timeout=None):
         return next(responses)
 
-    monkeypatch.setattr(
-        "biotoolsllmannotate.enrich.europe_pmc.requests.get", fake_get
-    )
+    monkeypatch.setattr("biotoolsllmannotate.enrich.europe_pmc.requests.get", fake_get)
 
     candidates = [
         {"title": "Tool", "publication": [{"PMCID": "PMC1234567", "pmid": "12345"}]}
@@ -122,4 +118,65 @@ def test_enrich_adds_full_text_when_available(monkeypatch):
     assert "This is the full text content." in candidates[0]["publication_full_text"]
     assert candidates[0]["publication_abstract"] == "This is an abstract."
     assert set(candidates[0]["publication_ids"]) == {"pmid:12345", "pmcid:PMC1234567"}
+    reset_europe_pmc_cache()
+
+
+def test_enrich_logs_homepage_summary(monkeypatch, caplog):
+    search_payload = {
+        "resultList": {
+            "result": [
+                {
+                    "title": "Sample Publication",
+                    "abstractText": "Abstract text.",
+                    "pmid": "12345",
+                }
+            ]
+        }
+    }
+
+    responses = iter([DummyResponse(json_data=search_payload)])
+
+    def fake_get(url, params=None, timeout=None):
+        return next(responses)
+
+    monkeypatch.setattr("biotoolsllmannotate.enrich.europe_pmc.requests.get", fake_get)
+
+    candidates = [
+        {
+            "title": "Tool",
+            "publication": [{"PMID": "12345"}],
+            "homepage_status": 200,
+            "documentation": [{"url": "https://example.org/docs"}],
+            "repository": "https://github.com/org/tool",
+        }
+    ]
+
+    config = {
+        "enabled": True,
+        "include_full_text": False,
+        "timeout": 10,
+        "max_publications": 1,
+    }
+
+    logger = logging.getLogger("test.enrich.homepage")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        enrich_candidates_with_europe_pmc(
+            candidates,
+            config=config,
+            logger=logger,
+            offline=False,
+        )
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == logger.name and "Europe PMC enriched" in record.getMessage()
+    ]
+    assert messages
+    message = messages[-1]
+    assert "homepage: status=200" in message
+    assert "docs=1" in message
+    assert "repo=yes" in message
+
     reset_europe_pmc_cache()

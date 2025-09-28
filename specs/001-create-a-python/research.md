@@ -1,7 +1,7 @@
 # Phase 0: Outline & Research — Pub2Tools-based bio.tools Annotation CLI
 
 ## Decisions
-- Pub2Tools source: Use official Pub2Tools outputs for “new tools” within a time window. Default window `--since 7d` (ISO-8601 timestamp derived at runtime).
+- Pub2Tools source: Use official Pub2Tools outputs for “new tools” within a time window. Default window `--from-date 7d` (ISO-8601 timestamp derived at runtime).
 - LLM: Use local `ollama` with a lightweight instruct model (default `llama3:8b`). Temperature 0.1, top_p 0.9, max tokens tuned to short rationales. Deterministic seed when supported.
 - Evidence rules: Include candidates only when both scores ≥ threshold (default 0.6 LS, 0.6 relevance) and at least one evidence link (homepage or docs).
 - Schema validation: Build pydantic models mirroring biotoolsSchema; validate every UploadPayload before writing.

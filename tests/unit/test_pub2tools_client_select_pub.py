@@ -37,3 +37,9 @@ def test_fetch_via_cli_select_pub(monkeypatch):
     assert cmd[1] == "-all"
     assert "--from" in cmd
     assert "--to" in cmd
+    out_dir_arg = Path(cmd[2])
+    assert out_dir_arg.parent == Path("out/pub2tools")
+    expected_prefix = f"range_{from_date}_to_"
+    assert out_dir_arg.name.startswith(expected_prefix)
+    # Unique suffix appended after the range for disambiguation
+    assert len(out_dir_arg.name) > len(expected_prefix)

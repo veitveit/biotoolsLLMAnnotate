@@ -1,26 +1,29 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import json
 import os
+import sys
+from time import perf_counter
 from collections.abc import Iterable
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import typer
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
 
 from biotoolsllmannotate import __version__ as PACKAGE_VERSION
 from biotoolsllmannotate.io.payload_writer import PayloadWriter
 from biotoolsllmannotate.schema.models import BioToolsEntry
+from biotoolsllmannotate.enrich import scrape_homepage_metadata
+from biotoolsllmannotate.ingest.pub2tools_fetcher import merge_edam_tags
 
 
 def parse_since(value: str | None) -> datetime:
@@ -112,7 +115,12 @@ def load_candidates(env_input: str | None) -> list[dict[str, Any]]:
             candidates = data.get("list") if isinstance(data.get("list"), list) else []
         else:
             candidates = []
-        return [x for x in candidates if isinstance(x, dict)]
+        merged: list[dict[str, Any]] = []
+        for raw in candidates:
+            if isinstance(raw, dict):
+                merge_edam_tags(raw)
+                merged.append(raw)
+        return merged
     except Exception:
         return []
     return []
@@ -204,7 +212,17 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
         "publication_ids",
         "include",
         "bio_score",
+        "bio_A1",
+        "bio_A2",
+        "bio_A3",
+        "bio_A4",
+        "bio_A5",
         "documentation_score",
+        "doc_B1",
+        "doc_B2",
+        "doc_B3",
+        "doc_B4",
+        "doc_B5",
         "concise_description",
         "rationale",
         "model",
@@ -215,6 +233,8 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             scores = row.get("scores") or {}
+            bio_subscores = scores.get("bio_subscores") or {}
+            doc_subscores = scores.get("documentation_subscores") or {}
             writer.writerow(
                 {
                     "id": row.get("id", ""),
@@ -224,7 +244,17 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
                     "publication_ids": ", ".join(row.get("publication_ids", []) or []),
                     "include": row.get("include", False),
                     "bio_score": scores.get("bio_score", ""),
+                    "bio_A1": bio_subscores.get("A1", ""),
+                    "bio_A2": bio_subscores.get("A2", ""),
+                    "bio_A3": bio_subscores.get("A3", ""),
+                    "bio_A4": bio_subscores.get("A4", ""),
+                    "bio_A5": bio_subscores.get("A5", ""),
                     "documentation_score": scores.get("documentation_score", ""),
+                    "doc_B1": doc_subscores.get("B1", ""),
+                    "doc_B2": doc_subscores.get("B2", ""),
+                    "doc_B3": doc_subscores.get("B3", ""),
+                    "doc_B4": doc_subscores.get("B4", ""),
+                    "doc_B5": doc_subscores.get("B5", ""),
                     "concise_description": scores.get("concise_description", ""),
                     "rationale": scores.get("rationale", ""),
                     "model": scores.get("model", ""),
@@ -289,6 +319,103 @@ def _publication_identifiers(candidate: dict[str, Any]) -> list[str]:
 
 
 ALLOWED_ENTRY_FIELDS = set(BioToolsEntry.model_fields.keys())
+
+
+def _prepare_output_structure(logger) -> None:
+    base = Path("out")
+    for folder in ("exports", "reports", "cache", "logs", "pub2tools"):
+        (base / folder).mkdir(parents=True, exist_ok=True)
+
+    migrations = [
+        (Path("out/payload.json"), base / "exports" / "biotools_payload.json"),
+        (Path("out/report.jsonl"), base / "reports" / "assessment.jsonl"),
+        (Path("out/report.csv"), base / "reports" / "assessment.csv"),
+        (Path("out/updated_entries.json"), base / "exports" / "biotools_entries.json"),
+        (
+            Path("out/enriched_candidates.json.gz"),
+            base / "cache" / "enriched_candidates.json.gz",
+        ),
+        (Path("out/ollama.log"), base / "logs" / "ollama.log"),
+    ]
+
+    pipeline = base / "pipeline"
+    migrations.extend(
+        [
+            (
+                pipeline / "exports" / "biotools_payload.json",
+                base / "exports" / "biotools_payload.json",
+            ),
+            (
+                pipeline / "exports" / "biotools_entries.json",
+                base / "exports" / "biotools_entries.json",
+            ),
+            (
+                pipeline / "reports" / "assessment.jsonl",
+                base / "reports" / "assessment.jsonl",
+            ),
+            (
+                pipeline / "reports" / "assessment.csv",
+                base / "reports" / "assessment.csv",
+            ),
+            (
+                pipeline / "cache" / "enriched_candidates.json.gz",
+                base / "cache" / "enriched_candidates.json.gz",
+            ),
+            (pipeline / "logs" / "ollama.log", base / "logs" / "ollama.log"),
+        ]
+    )
+
+    for src, dest in migrations:
+        if not src.exists():
+            continue
+        if dest.exists():
+            logger.warning(
+                "Legacy output %s left in place because %s already exists", src, dest
+            )
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            src.rename(dest)
+            logger.info("Moved legacy output from %s to %s", src, dest)
+        except OSError as exc:
+            logger.warning(
+                "Could not migrate legacy output %s -> %s: %s", src, dest, exc
+            )
+
+    legacy_pub2tools = pipeline / "pub2tools"
+    target_pub2tools = base / "pub2tools"
+    if legacy_pub2tools.exists():
+        target_pub2tools.mkdir(parents=True, exist_ok=True)
+        try:
+            for child in sorted(legacy_pub2tools.iterdir()):
+                dest = target_pub2tools / child.name
+                if dest.exists():
+                    logger.warning(
+                        "Legacy Pub2Tools artifact %s not moved because %s exists",
+                        child,
+                        dest,
+                    )
+                    continue
+                child.rename(dest)
+                logger.info(
+                    "Moved legacy Pub2Tools artifact from %s to %s", child, dest
+                )
+        except OSError as exc:
+            logger.warning("Could not migrate legacy Pub2Tools outputs: %s", exc)
+
+    # Attempt to remove empty legacy folders
+    for path in [
+        pipeline / "exports",
+        pipeline / "reports",
+        pipeline / "cache",
+        pipeline / "logs",
+        pipeline / "pub2tools",
+        pipeline,
+    ]:
+        try:
+            path.rmdir()
+        except OSError:
+            continue
 
 
 def write_updated_entries(
@@ -376,8 +503,7 @@ def _merge_publications(
         normalized = {
             key: value
             for key, value in ((k.lower(), v) for k, v in pub.items())
-            if key in {"pmcid", "pmid", "doi", "type", "note", "version"}
-            and value
+            if key in {"pmcid", "pmid", "doi", "type", "note", "version"} and value
         }
         if not normalized:
             continue
@@ -415,8 +541,7 @@ def _normalize_publications(publications: list[Any]) -> list[dict[str, Any]] | N
         cleaned = {
             key: value
             for key, value in ((k.lower(), v) for k, v in publication.items())
-            if key in {"pmcid", "pmid", "doi", "type", "note", "version"}
-            and value
+            if key in {"pmcid", "pmid", "doi", "type", "note", "version"} and value
         }
         if cleaned:
             normalized.append(cleaned)
@@ -431,7 +556,9 @@ def _ensure_homepage_link(links: Any, homepage: str) -> list[dict[str, Any]] | N
         for entry in links:
             if isinstance(entry, dict):
                 normalized.append(entry)
-    if not any(isinstance(entry, dict) and entry.get("url") == homepage for entry in normalized):
+    if not any(
+        isinstance(entry, dict) and entry.get("url") == homepage for entry in normalized
+    ):
         normalized.append({"url": homepage, "type": ["Homepage"]})
     return normalized
 
@@ -440,6 +567,26 @@ def _remove_null_fields(data: dict[str, Any]) -> None:
     for key in list(data.keys()):
         if data[key] is None:
             del data[key]
+
+
+def _save_enriched_candidates(
+    candidates: list[dict[str, Any]], path: Path, logger
+) -> None:
+    try:
+        ensure_parent(path)
+        with gzip.open(path, "wt", encoding="utf-8") as fh:
+            json.dump(candidates, fh, ensure_ascii=False)
+        logger.info("CACHE saved enriched candidates -> %s", path)
+    except Exception as exc:
+        logger.warning("Failed to write enriched cache %s: %s", path, exc)
+
+
+def _load_enriched_candidates(path: Path) -> list[dict[str, Any]]:
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, list):
+        raise ValueError("Enriched cache is not a list of candidates")
+    return [c for c in data if isinstance(c, dict)]
 
 
 def _resolve_homepage(
@@ -465,8 +612,8 @@ def execute_run(
     min_score: float = 0.6,
     limit: int | None = None,
     dry_run: bool = False,
-    output: Path = Path("out/payload.json"),
-    report: Path = Path("out/report.jsonl"),
+    output: Path = Path("out/exports/biotools_payload.json"),
+    report: Path = Path("out/reports/assessment.jsonl"),
     model: str | None = None,
     concurrency: int = 8,
     input_path: str | None = None,
@@ -479,130 +626,443 @@ def execute_run(
     show_progress: bool = True,
     updated_entries: Path | None = None,
     config_data: dict[str, Any] | None = None,
+    enriched_cache: Path | None = None,
+    resume_from_enriched: bool = False,
 ) -> None:
     from biotoolsllmannotate.io.logging import get_logger, setup_logging
 
-    setup_logging()
-    logger = get_logger("pipeline")
+    stdout_is_tty = False
+    stdout = getattr(sys, "stdout", None)
+    if stdout is not None:
+        isatty = getattr(stdout, "isatty", None)
+        if callable(isatty):
+            try:
+                stdout_is_tty = bool(isatty())
+            except Exception:
+                stdout_is_tty = False
     if config_data is None:
         from biotoolsllmannotate.config import get_config_yaml
 
         config_data = get_config_yaml()
-    logger.info("🚀 Starting biotoolsLLMAnnotate pipeline run")
-    logger.info(f"   📅 Date range: {from_date or '7d'} to {to_date or 'now'}")
-    logger.info(f"   🎯 Min score: {min_score}, Limit: {limit or 'unlimited'}")
-    logger.info(f"   📊 Output: {output}, Report: {report}")
-    logger.info(f"   🤖 Model: {model or 'default'}, Concurrency: {concurrency}")
-    logger.info(
-        f"   {'🔌 Offline mode' if offline else '🌐 Online mode (will fetch from Pub2Tools if needed)'}"
-    )
-    """Fetch from Pub2Tools, assess, improve, and emit outputs (stub pipeline)."""
-    _since = parse_since(from_date or "7d")
-    _to = parse_since(to_date) if to_date else datetime.now(UTC)
-    # Advanced input path preference
-    env_input = input_path or os.environ.get("BIOTOOLS_ANNOTATE_INPUT")
-    if not env_input:
-        # Allow config-driven override without re-running Pub2Tools
-        env_input = os.environ.get("BIOTOOLS_ANNOTATE_JSON")
-    candidates = load_candidates(env_input)
-    if env_input:
+    total_steps = 5
+
+    progress_mode_env_raw = os.environ.get("BIOTOOLS_PROGRESS", "").strip().lower()
+    mode = progress_mode_env_raw or "auto"
+    off_modes = {"off", "0", "false", "none", "disable", "disabled"}
+    plain_modes = {"plain", "simple", "text"}
+    live_modes = {"live", "rich", "fancy"}
+    force_live_modes = {"force", "force-live", "live!"}
+    auto_modes = {"auto", "default"}
+
+    want_progress = show_progress and mode not in off_modes
+    pytest_active = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+    live_enabled = False
+    simple_status_enabled = False
+    force_live_requested = want_progress and mode in force_live_modes
+    live_fallback_reason: str | None = None
+
+    if want_progress:
+        if force_live_requested:
+            live_enabled = True
+        elif mode in live_modes:
+            live_enabled = stdout_is_tty and not pytest_active
+            if not live_enabled:
+                live_fallback_reason = "no interactive terminal detected"
+                simple_status_enabled = True
+        elif mode in plain_modes:
+            simple_status_enabled = True
+        else:  # auto/default or unknown -> pick live when interactive
+            auto_live = stdout_is_tty and not pytest_active
+            live_enabled = auto_live
+            if not live_enabled:
+                live_fallback_reason = "non-interactive output"
+            simple_status_enabled = not live_enabled
+
+    if live_enabled and not force_live_requested:
+        if not stdout_is_tty:
+            if live_fallback_reason is None:
+                live_fallback_reason = "non-interactive output"
+            live_enabled = False
+            simple_status_enabled = want_progress
+
+    log_fallback_message = False
+    log_force_warning = False
+    if live_fallback_reason and simple_status_enabled:
+        log_fallback_message = True
+    elif force_live_requested and live_enabled and not stdout_is_tty:
+        log_force_warning = True
+
+    console_kwargs: dict[str, Any] = {"force_jupyter": False}
+    if live_enabled or force_live_requested:
+        console_kwargs.update(force_terminal=True, force_interactive=True)
+    console = Console(**console_kwargs)
+
+    setup_logging(console=console)
+    logger = get_logger("pipeline")
+
+    if log_fallback_message:
         logger.info(
-            f"📁 Loaded {len(candidates)} candidates from input file: {env_input}"
+            "Progress status: live mode disabled (%s); showing plain updates. Set BIOTOOLS_PROGRESS=force to override.",
+            live_fallback_reason,
         )
-    else:
-        logger.info(f"📁 No input file provided, will fetch from Pub2Tools if needed")
-    # If no local input provided, try Pub2Tools with date range if from_date/to_date are set
-    if not candidates and not offline and (from_date or to_date):
-        try:
-            from ..ingest import pub2tools_client as p2t_client
+    elif log_force_warning:
+        logger.warning(
+            "Progress status: forcing live display without TTY support; output may contain redraw artifacts."
+        )
 
-            # Parse from_date and to_date
-            from_date_dt = parse_since(from_date) if from_date else _since
-            to_date_dt = parse_since(to_date) if to_date else _to
+    def step_msg(step: int, text: str) -> str:
+        return f"[Step {step}/{total_steps}] {text}"
 
+    status_lock = Lock()
+    status_lines = [
+        "GATHER – initializing…",
+        "DEDUP – waiting…",
+        "ENRICH – waiting…",
+        "SCORE – waiting…",
+        "OUTPUT – waiting…",
+    ]
+    status_progress: list[tuple[int, int] | None] = [None] * len(status_lines)
+    status_board: Live | None = None
+    last_logged_statuses: list[str] | None = None
+
+    def format_progress(current: int, total: int, width: int = 24) -> str:
+        if total <= 0:
+            return ""
+        current = max(0, min(current, total))
+        filled = int(width * current / total) if total else 0
+        bar = "#" * filled + "-" * max(width - filled, 0)
+        percent = (current / total) * 100 if total else 0
+        return f"[{bar}] {current}/{total} ({percent:5.1f}%)"
+
+    def compose_status(idx: int) -> str:
+        base = status_lines[idx]
+        progress_state = status_progress[idx]
+        if progress_state:
+            current, total = progress_state
+            bar = format_progress(current, total)
+            if bar:
+                base = f"{base} {bar}"
+        return base
+
+    def render_status() -> Panel:
+        table = Table.grid(padding=(0, 1))
+        with status_lock:
+            for idx in range(len(status_lines)):
+                message = compose_status(idx)
+                table.add_row(f"[bold cyan]S{idx + 1}[/] {message}")
+        return Panel(table, title="Pipeline Status", border_style="cyan")
+
+    def refresh_status(index: int | None = None) -> None:
+        if status_board:
+            status_board.update(render_status(), refresh=True)
+        elif simple_status_enabled and last_logged_statuses is not None:
+            indices = range(len(status_lines)) if index is None else [index]
+            with status_lock:
+                for idx in indices:
+                    rendered = compose_status(idx)
+                    if last_logged_statuses[idx] != rendered:
+                        console.print(f"[bold cyan]S{idx + 1}[/] {rendered}")
+                        last_logged_statuses[idx] = rendered
+
+    def set_status(index: int, message: str, *, clear_progress: bool = False) -> None:
+        with status_lock:
+            status_lines[index] = message
+            if clear_progress:
+                status_progress[index] = None
+        refresh_status(index)
+
+    def update_progress(index: int, current: int, total: int) -> None:
+        if total <= 0:
+            with status_lock:
+                status_progress[index] = None
+        else:
+            clamped = max(0, min(current, total))
+            with status_lock:
+                status_progress[index] = (clamped, total)
+        refresh_status(index)
+
+    if live_enabled:
+        status_board = Live(
+            render_status(),
+            console=console,
+            refresh_per_second=6,
+            transient=True,
+        )
+        status_board.start()
+    elif simple_status_enabled:
+        with status_lock:
+            last_logged_statuses = [compose_status(i) for i in range(len(status_lines))]
+
+    try:
+
+        fetch_from_label = from_date or "7d"
+        fetch_from_dt = parse_since(fetch_from_label)
+        fetch_to_dt = parse_since(to_date) if to_date else None
+
+        logger.info("🚀 Starting biotoolsLLMAnnotate pipeline run")
+        logger.info(
+            f"   📅 Pub2Tools fetch range: {fetch_from_label} to {to_date or 'now'}"
+        )
+        logger.info(f"   🎯 Min score: {min_score}, Limit: {limit or 'unlimited'}")
+        logger.info(f"   📊 Output: {output}, Report: {report}")
+        logger.info(f"   🤖 Model: {model or 'default'}, Concurrency: {concurrency}")
+        logger.info(
+            f"   {'🔌 Offline mode' if offline else '🌐 Online mode (will fetch from Pub2Tools if needed)'}"
+        )
+        set_status(0, "GATHER – preparing input sources")
+        _prepare_output_structure(logger)
+        logger.info(step_msg(1, "Gather Pub2Tools candidates or load cached input"))
+
+        cache_path: Path | None
+        if isinstance(enriched_cache, Path):
+            cache_path = enriched_cache
+        elif isinstance(enriched_cache, str):
+            cache_path = Path(enriched_cache)
+        else:
+            cache_path = None
+
+        candidates: list[dict[str, Any]] = []
+        resumed = False
+
+        if resume_from_enriched:
+            if cache_path is None:
+                logger.warning(
+                    "--resume-from-enriched requested but no enriched cache path configured"
+                )
+                set_status(0, "GATHER – cache resume skipped (no path)")
+            elif not cache_path.exists():
+                logger.warning(
+                    "--resume-from-enriched requested but cache file not found: %s",
+                    cache_path,
+                )
+                set_status(0, "GATHER – cache resume skipped (missing file)")
+            else:
+                try:
+                    candidates = _load_enriched_candidates(cache_path)
+                    resumed = True
+                    logger.info(
+                        "♻️ Resumed from enriched cache %s with %d candidates",
+                        cache_path,
+                        len(candidates),
+                    )
+                    set_status(
+                        0,
+                        f"GATHER – resumed {len(candidates)} candidates from cache",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to load enriched cache %s: %s; falling back to fresh ingestion",
+                        cache_path,
+                        exc,
+                    )
+                    set_status(0, "GATHER – cache resume failed, refetching")
+                    candidates = []
+                    resumed = False
+
+        if not resumed:
+            env_input = input_path or os.environ.get("BIOTOOLS_ANNOTATE_INPUT")
+            if not env_input:
+                env_input = os.environ.get("BIOTOOLS_ANNOTATE_JSON")
+            candidates = load_candidates(env_input)
+            if env_input:
+                logger.info(
+                    f"INPUT file %s -> %d candidates", env_input, len(candidates)
+                )
+                set_status(
+                    0,
+                    f"GATHER – loaded {len(candidates)} candidates from input",
+                )
+            else:
+                set_status(0, "GATHER – no local input, Pub2Tools may run")
+            if not candidates and not offline:
+                try:
+                    from ..ingest import pub2tools_client as p2t_client
+
+                    logger.info(
+                        "FETCH Pub2Tools range %s → %s",
+                        fetch_from_dt.date(),
+                        (fetch_to_dt.date() if fetch_to_dt else "now"),
+                    )
+                    set_status(0, "GATHER – invoking Pub2Tools fetch")
+                    candidates = p2t_client.fetch_via_cli(
+                        fetch_from_dt,
+                        to_date=fetch_to_dt,
+                        limit=limit,
+                        cli_path=p2t_cli,
+                        edam_owl=edam_owl or "http://edamontology.org/EDAM.owl",
+                        idf=idf
+                        or "https://github.com/edamontology/edammap/raw/master/doc/biotools.idf",
+                        idf_stemmed=idf_stemmed
+                        or "https://github.com/edamontology/edammap/raw/master/doc/biotools.stemmed.idf",
+                    )
+                    logger.info(
+                        "FETCH complete – %d candidates retrieved from Pub2Tools",
+                        len(candidates),
+                    )
+                    set_status(
+                        0,
+                        f"GATHER – fetched {len(candidates)} candidates via Pub2Tools",
+                    )
+                except Exception as e:
+                    logger.warning(f"Pub2Tools fetch with date range failed: {e}")
+                    set_status(0, "GATHER – Pub2Tools fetch failed")
+                    candidates = candidates or []
+
+        if candidates:
+            logger.info(step_msg(2, "DEDUP – Filter candidate list"))
+            set_status(1, f"DEDUP – processing {len(candidates)} candidates")
+            try:
+                from ..ingest import pub2tools_fetcher as pf
+
+                candidates = pf.filter_and_normalize(candidates)
+                logger.info(
+                    "DEDUP kept %d unique candidates after normalization",
+                    len(candidates),
+                )
+                set_status(1, f"DEDUP – kept {len(candidates)} unique candidates")
+            except Exception as e:
+                logger.warning(f"Deduplication failed: {e}")
+                kept: list[dict[str, Any]] = []
+                seen: set[tuple[str, str]] = set()
+                for c in candidates:
+                    homepage = primary_homepage(c.get("urls", [])) or ""
+                    key = (str(c.get("title") or ""), homepage)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    kept.append(c)
+                candidates = kept
+                logger.info("DEDUP fallback kept %d unique candidates", len(candidates))
+                set_status(
+                    1, f"DEDUP – fallback kept {len(candidates)} unique candidates"
+                )
+        else:
+            set_status(1, "DEDUP – no candidates available")
+
+        if candidates and enriched_cache and not resume_from_enriched:
+            _save_enriched_candidates(candidates, enriched_cache, logger)
+
+        if limit is not None:
+            candidates = candidates[: max(0, int(limit))]
+            logger.info("LIMIT applied – processing %d candidates", len(candidates))
+            set_status(1, f"DEDUP – limit applied, {len(candidates)} remain")
+
+        enrichment_cfg = config_data.get("enrichment", {}) or {}
+        homepage_cfg = enrichment_cfg.get("homepage", {}) or {}
+        europe_pmc_cfg = enrichment_cfg.get("europe_pmc", {}) or {}
+
+        if candidates:
+            logger.info(step_msg(3, "ENRICH – Homepage & publication evidence"))
+        else:
+            logger.info(step_msg(3, "ENRICH – skipped (no candidates)"))
+            set_status(2, "ENRICH – skipped (no candidates)")
+
+        if (
+            candidates
+            and not offline
+            and not resume_from_enriched
+            and homepage_cfg.get("enabled", True)
+        ):
             logger.info(
-                f"🔍 Fetching candidates from Pub2Tools for date range: {from_date_dt.date()} to {to_date_dt.date()}"
+                "SCRAPE homepage metadata for %d candidates (timeout=%ss)",
+                len(candidates),
+                homepage_cfg.get("timeout", 8),
             )
-            candidates = p2t_client.fetch_via_cli(
-                from_date_dt,
-                to_date=to_date_dt,
-                limit=limit,
-                cli_path=p2t_cli,
-                edam_owl=edam_owl or "http://edamontology.org/EDAM.owl",
-                idf=idf
-                or "https://github.com/edamontology/edammap/raw/master/doc/biotools.idf",
-                idf_stemmed=idf_stemmed
-                or "https://github.com/edamontology/edammap/raw/master/doc/biotools.stemmed.idf",
-            )
-            logger.info(f"✅ Fetched {len(candidates)} candidates from Pub2Tools")
-        except Exception as e:
-            logger.warning(f"Pub2Tools fetch with date range failed: {e}")
-            candidates = candidates or []
-
-    # Filter by time and deduplicate
-    if candidates:
-        try:
-            from ..ingest import pub2tools_fetcher as pf
-
-            candidates = pf.filter_and_normalize(candidates, _since)
-            logger.info(f"🧹 Filtered and deduplicated to {len(candidates)} candidates")
-        except Exception as e:
-            logger.warning(f"Deduplication failed: {e}")
-            kept: list[dict[str, Any]] = []
-            seen: set[tuple[str, str]] = set()
-            for c in candidates:
-                ts = candidate_published_at(c)
-                if ts is not None and ts < _since:
-                    continue
-                homepage = primary_homepage(c.get("urls", [])) or ""
-                key = (str(c.get("title") or ""), homepage)
-                if key in seen:
-                    continue
-                seen.add(key)
-                kept.append(c)
-            candidates = kept
+            set_status(2, f"SCRAPE – scanning {len(candidates)} homepages")
+            update_progress(2, 0, len(candidates))
+            scraped_count = 0
+            for idx, candidate in enumerate(candidates, start=1):
+                scrape_homepage_metadata(candidate, config=homepage_cfg, logger=logger)
+                if candidate.get("homepage_scraped"):
+                    scraped_count += 1
+                update_progress(2, idx, len(candidates))
             logger.info(
-                f"🧹 Deduplicated to {len(candidates)} candidates (fallback logic)"
+                "SCRAPE completed – %d/%d candidates processed",
+                scraped_count,
+                len(candidates),
             )
-
-    if limit is not None:
-        candidates = candidates[: max(0, int(limit))]
-        logger.info(f"✂️ Limited to {len(candidates)} candidates after applying limit")
-
-    # Enrich with publication data from Europe PMC when available
-    europe_pmc_cfg = (config_data.get("enrichment", {}) or {}).get("europe_pmc", {})
-    if (
-        candidates
-        and not offline
-        and europe_pmc_cfg.get("enabled", True)
-    ):
-        try:
-            from biotoolsllmannotate.enrich import enrich_candidates_with_europe_pmc
-
-            enrich_candidates_with_europe_pmc(
-                candidates,
-                config=europe_pmc_cfg,
-                logger=logger,
-                offline=offline,
+            set_status(
+                2,
+                f"SCRAPE – completed {scraped_count}/{len(candidates)} homepages",
+                clear_progress=True,
             )
-            logger.info("📚 Enriched candidates with Europe PMC metadata where available")
-        except Exception as exc:
-            logger.warning(f"Europe PMC enrichment skipped due to error: {exc}")
+        elif candidates:
+            reason = (
+                "offline mode"
+                if offline
+                else ("cache reuse" if resume_from_enriched else "disabled")
+            )
+            logger.info(f"SCRAPE skipped – {reason}")
+            set_status(2, f"SCRAPE – skipped ({reason})")
 
-    payload: list[dict[str, Any]] = []
-    report_rows: list[dict[str, Any]] = []
-    accepted_records: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+        enrichment_active = (
+            candidates
+            and not offline
+            and not resume_from_enriched
+            and europe_pmc_cfg.get("enabled", True)
+        )
+        if candidates and enrichment_active:
+            try:
+                from biotoolsllmannotate.enrich import enrich_candidates_with_europe_pmc
 
-    logger.info(
-        f"🧠 Scoring {len(candidates)} candidates using {model or 'default'} model..."
-    )
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+                total_europe = len(candidates)
+                set_status(
+                    2,
+                    f"ENRICH – Europe PMC processing {total_europe} candidates",
+                )
+                update_progress(2, 0, total_europe)
 
-    progress: Progress | None = None
-    task_id: int | None = None
+                enrich_candidates_with_europe_pmc(
+                    candidates,
+                    config=europe_pmc_cfg,
+                    logger=logger,
+                    offline=offline,
+                    progress_callback=lambda completed, total: update_progress(
+                        2, completed, total or total_europe
+                    ),
+                )
+                logger.info(
+                    "ENRICH completed – Europe PMC metadata added where available"
+                )
+                set_status(2, "ENRICH – Europe PMC metadata added", clear_progress=True)
+            except Exception as exc:
+                logger.warning(f"Europe PMC enrichment skipped due to error: {exc}")
+                set_status(
+                    2, "ENRICH – Europe PMC error, see logs", clear_progress=True
+                )
+        elif candidates and not enrichment_active:
+            if offline:
+                logger.info("ENRICH Europe PMC skipped – offline mode enabled")
+                set_status(2, "ENRICH – Europe PMC skipped (offline)")
+            elif resume_from_enriched:
+                logger.info("ENRICH Europe PMC skipped – enriched cache reuse")
+                set_status(2, "ENRICH – Europe PMC skipped (cache)")
+            else:
+                logger.info("ENRICH Europe PMC skipped – disabled in config")
+                set_status(2, "ENRICH – Europe PMC skipped (disabled)")
 
-    if offline:
-        def score_one(c):
+        payload: list[dict[str, Any]] = []
+        report_rows: list[dict[str, Any]] = []
+        accepted_records: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+
+        logger.info(
+            step_msg(
+                4,
+                f"SCORE – {len(candidates)} candidates using {model or 'default'} scoring",
+            )
+        )
+        total_candidates = len(candidates)
+        if total_candidates == 0:
+            set_status(3, "SCORE – skipped (no candidates)")
+        else:
+            set_status(3, f"SCORE – preparing {total_candidates} candidates")
+            update_progress(3, 0, total_candidates)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        score_fallbacks = {"llm": 0, "health": 0}
+
+        def heuristic_score_one(c: dict[str, Any]):
             urls = [str(u) for u in (c.get("urls") or [])]
             homepage = c.get("homepage") or primary_homepage(urls) or ""
             publication_ids = _publication_identifiers(c)
@@ -624,45 +1084,7 @@ def execute_run(
                 or ""
             )
             scores = simple_scores(c)
-            include = include_candidate(
-                scores, min_score=min_score, has_homepage=bool(homepage)
-            )
-            decision = {
-                "id": str(candidate_id),
-                "title": str(title),
-                "homepage": homepage,
-                "publication_ids": publication_ids,
-                "scores": scores,
-                "include": include,
-            }
-            return (decision, c, homepage, include)
-    else:
-        from biotoolsllmannotate.assess.scorer import Scorer
-
-        scorer = Scorer(model=model, config=config_data)
-
-        def score_one(c):
-            urls = [str(u) for u in (c.get("urls") or [])]
-            homepage = c.get("homepage") or primary_homepage(urls) or ""
-            publication_ids = _publication_identifiers(c)
-            if publication_ids:
-                c.setdefault("publication_ids", publication_ids)
-            candidate_id = (
-                c.get("id")
-                or c.get("tool_id")
-                or c.get("biotools_id")
-                or c.get("biotoolsID")
-                or c.get("identifier")
-                or ""
-            )
-            title = (
-                c.get("title")
-                or c.get("name")
-                or c.get("tool_title")
-                or c.get("display_title")
-                or ""
-            )
-            scores = scorer.score_candidate(c)
+            scores.setdefault("model", "heuristic")
             include = include_candidate(
                 scores, min_score=min_score, has_homepage=bool(homepage)
             )
@@ -676,79 +1098,170 @@ def execute_run(
             }
             return (decision, c, homepage, include)
 
-    try:
-        if show_progress and candidates:
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("{task.completed}/{task.total}"),
-                TimeElapsedColumn(),
-                transient=True,
-            )
-            progress.start()
-            task_id = progress.add_task(
-                "Scoring candidates", total=len(candidates)
-            )
+        use_llm = not offline
+        scorer = None
 
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = [executor.submit(score_one, c) for c in candidates]
-            for idx, fut in enumerate(as_completed(futures), 1):
-                decision, c, homepage, include = fut.result()
-                report_rows.append(decision)
-                scores = decision.get("scores", {})
-                if include:
-                    payload.append(to_entry(c, homepage))
-                    accepted_records.append((c, scores, homepage))
-                if progress and task_id is not None:
-                    progress.update(task_id, advance=1)
-                elif idx % 10 == 0 or idx == len(candidates):
-                    logger.info(
-                        f"📈 Progress: {idx}/{len(candidates)} candidates scored"
+        if use_llm:
+            from biotoolsllmannotate.assess.scorer import Scorer
+
+            scorer = Scorer(model=model, config=config_data)
+            client = getattr(scorer, "client", None)
+            if client is not None and hasattr(client, "ping"):
+                healthy, health_error = client.ping()
+            else:  # pragma: no cover - only hit in heavily mocked tests
+                healthy, health_error = True, None
+            if not healthy:
+                score_fallbacks["health"] = 1
+                use_llm = False
+                logger.warning(
+                    "LLM health check failed (%s). Using heuristic scoring for this run; consider --offline if repeating.",
+                    health_error,
+                )
+                set_status(3, "SCORE – heuristic fallback (LLM unavailable)")
+
+        if not use_llm:
+            if offline and total_candidates:
+                set_status(3, "SCORE – heuristic scoring (offline mode)")
+
+            def score_one(c):
+                return heuristic_score_one(c)
+
+        else:
+
+            def score_one(c):
+                urls = [str(u) for u in (c.get("urls") or [])]
+                homepage = c.get("homepage") or primary_homepage(urls) or ""
+                publication_ids = _publication_identifiers(c)
+                if publication_ids:
+                    c.setdefault("publication_ids", publication_ids)
+                candidate_id = (
+                    c.get("id")
+                    or c.get("tool_id")
+                    or c.get("biotools_id")
+                    or c.get("biotoolsID")
+                    or c.get("identifier")
+                    or ""
+                )
+                title = (
+                    c.get("title")
+                    or c.get("name")
+                    or c.get("tool_title")
+                    or c.get("display_title")
+                    or ""
+                )
+                try:
+                    scores = scorer.score_candidate(c)
+                except Exception as exc:
+                    score_fallbacks["llm"] += 1
+                    logger.warning(
+                        "LLM scoring failed for '%s': %s. Using heuristic backup; rerun with --offline or check Ollama service.",
+                        title or candidate_id or "<unknown>",
+                        exc,
                     )
-    finally:
-        if progress:
-            progress.stop()
+                    set_status(3, "SCORE – temporary LLM failure, heuristics applied")
+                    return heuristic_score_one(c)
+                include = include_candidate(
+                    scores, min_score=min_score, has_homepage=bool(homepage)
+                )
+                decision = {
+                    "id": str(candidate_id),
+                    "title": str(title),
+                    "homepage": homepage,
+                    "publication_ids": publication_ids,
+                    "scores": scores,
+                    "include": include,
+                }
+                return (decision, c, homepage, include)
 
-    # Always write report
-    logger.info(f"📝 Writing report to {report}")
-    write_jsonl(report, report_rows)
-    report_csv = report.with_suffix(".csv")
-    logger.info(f"📝 Writing CSV report to {report_csv}")
-    write_report_csv(report_csv, report_rows)
-
-    # Validate payload entries against schema
-    from biotoolsllmannotate.schema.models import BioToolsEntry
-
-    invalids = []
-    for entry in payload:
+        score_start = perf_counter()
+        score_duration = 0.0
         try:
-            BioToolsEntry(**entry)
-        except Exception as e:
-            invalids.append({"entry": entry, "error": str(e)})
+            if total_candidates:
+                update_interval = max(1, total_candidates // 20)
+                processed = 0
+                with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                    futures = [executor.submit(score_one, c) for c in candidates]
+                    for fut in as_completed(futures):
+                        decision, c, homepage, include = fut.result()
+                        processed += 1
+                        report_rows.append(decision)
+                        scores = decision.get("scores", {})
+                        if include:
+                            payload.append(to_entry(c, homepage))
+                            accepted_records.append((c, scores, homepage))
+                        update_progress(3, processed, total_candidates)
+                        if (
+                            processed % update_interval == 0
+                            or processed == total_candidates
+                        ):
+                            set_status(
+                                3,
+                                f"SCORE – processed {processed}/{total_candidates} candidates",
+                            )
+            else:
+                processed = 0
+        finally:
+            score_duration = perf_counter() - score_start
 
-    # Write payload unless dry-run (spec: dry-run emits only report)
-    if not dry_run:
-        logger.info(f"💾 Writing payload to {output}")
-        write_json(output, payload)
-        updated_path = updated_entries or output.with_name("updated_entries.json")
-        write_updated_entries(
-            accepted_records,
-            updated_path,
-            config_data=config_data,
-            logger=logger,
+        accepted_count = len(accepted_records)
+        total_scored = len(candidates)
+        rejected_count = max(total_scored - accepted_count, 0)
+        logger.info(
+            "SUMMARY score=%d accepted=%d rejected=%d llm_fallbacks=%d llm_health_fail=%d duration=%.2fs",
+            total_scored,
+            accepted_count,
+            rejected_count,
+            score_fallbacks.get("llm", 0),
+            score_fallbacks.get("health", 0),
+            score_duration,
+        )
+        logger.info("TIMING score_elapsed_seconds=%.3f", score_duration)
+        set_status(
+            3,
+            f"SCORE – complete in {score_duration:.1f}s ({accepted_count} accepted, {rejected_count} rejected)",
+            clear_progress=True,
         )
 
-    if invalids:
-        logger.error(
-            f"Payload validation failed for {len(invalids)} entries. See report for details."
-        )
-        # Optionally, write invalids to a separate file for debugging
-        write_json(output.with_suffix(".invalid.json"), invalids)
-        import sys
+        logger.info(step_msg(5, "OUTPUT – Write reports and bio.tools payload"))
+        set_status(4, "OUTPUT – writing reports")
+        logger.info(f"📝 Writing report to {report}")
+        write_jsonl(report, report_rows)
+        report_csv = report.with_suffix(".csv")
+        logger.info(f"📝 Writing CSV report to {report_csv}")
+        write_report_csv(report_csv, report_rows)
 
-        sys.exit(2)
+        invalids = []
+        for entry in payload:
+            try:
+                BioToolsEntry(**entry)
+            except Exception as e:
+                invalids.append({"entry": entry, "error": str(e)})
 
-    logger.info("🎉 Pipeline run complete!")
-    # Typer returns 0 by default when no exception; ensure files exist
+        if not dry_run:
+            logger.info(f"OUTPUT payload -> {output}")
+            set_status(4, "OUTPUT – writing payload")
+            write_json(output, payload)
+            updated_path = updated_entries or output.with_name("biotools_entries.json")
+            write_updated_entries(
+                accepted_records,
+                updated_path,
+                config_data=config_data,
+                logger=logger,
+            )
+        else:
+            set_status(4, "OUTPUT – dry-run (payload skipped)")
+
+        if invalids:
+            logger.error(
+                f"Payload validation failed for {len(invalids)} entries. See report for details."
+            )
+            write_json(output.with_suffix(".invalid.json"), invalids)
+            set_status(4, "OUTPUT – validation failed, see *.invalid.json")
+            sys.exit(2)
+
+        logger.info("🎉 Pipeline run complete!")
+        set_status(4, "OUTPUT – complete")
+    finally:
+        if status_board:
+            status_board.stop()
     return

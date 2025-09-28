@@ -111,6 +111,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .pub2tools_fetcher import merge_edam_tags
+
 
 def _iso_utc(dt: datetime) -> str:
     dt = dt.astimezone(UTC)
@@ -130,7 +132,13 @@ def _load_json_array(path: Path) -> list[dict[str, Any]]:
             candidates = data.get("list") if isinstance(data.get("list"), list) else []
         else:
             candidates = []
-        return [x for x in candidates if isinstance(x, dict)]
+        result: list[dict[str, Any]] = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            merge_edam_tags(item)
+            result.append(item)
+        return result
     except Exception:
         return []
 
@@ -221,11 +229,13 @@ def fetch_via_cli(
         _iso_utc(to_date)[:10] if to_date else _iso_utc(datetime.now(UTC))[:10]
     )
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = f"out/pub2tools_{timestamp}"
+    range_prefix = f"range_{from_date}_to_{to_date_str}"
+    unique_suffix = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    output_dir = Path("out/pub2tools") / f"{range_prefix}_{unique_suffix}"
+    output_dir.mkdir(parents=True, exist_ok=True)
     cmd = cli_parts + [
         "-all",
-        output_dir,
+        str(output_dir),
         "--from",
         from_date,
         "--to",
@@ -254,7 +264,7 @@ def fetch_via_cli(
             timeout=86400,  # 1 day timeout
         )
         # Load the to_biotools.json file
-        to_biotools_path = Path(output_dir) / "to_biotools.json"
+        to_biotools_path = output_dir / "to_biotools.json"
         if to_biotools_path.exists():
             return _load_json_array(to_biotools_path)
         else:

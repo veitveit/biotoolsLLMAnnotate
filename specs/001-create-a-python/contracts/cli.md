@@ -4,7 +4,7 @@
 `biotools-annotate run [OPTIONS]`
 
 ## Options
-- `--since <SPAN>`: time window for new tools (e.g., `7d`, `30d`, `2025-09-01T00:00:00Z`). REQUIRED.
+- `--from-date <SPAN>`: time window for new tools (e.g., `7d`, `30d`, `2025-09-01`). REQUIRED.
 - `--min-score <FLOAT>`: minimum LS and relevance score for inclusion (default 0.6).
 - `--limit <INT>`: max candidates to process (default unlimited).
 - `--dry-run`: perform assessment and emit report only; do not write payload.
@@ -30,10 +30,10 @@
 
 ## Examples
 ```
-biotools-annotate run --since 7d --min-score 0.6 \
+biotools-annotate run --from-date 7d --min-score 0.6 \
   --output out/payload.json --report out/report.jsonl
 
-biotools-annotate run --since 2025-09-01T00:00:00Z --dry-run
+biotools-annotate run --from-date 2025-09-01 --dry-run
 ```
 
 ## Outputs

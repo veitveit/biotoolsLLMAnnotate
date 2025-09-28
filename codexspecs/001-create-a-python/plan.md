@@ -48,7 +48,7 @@ Build a Python CLI that:
 
 - Code Quality & Simplicity: black/ruff/mypy clean; small, readable modules. PASS (planned).
 - Testing Discipline: tests first where feasible; ≥90% coverage on changed areas; deterministic with mocks. PASS (planned).
-- UX Consistency: stable flags (`--since`, `--min-score`, `--dry-run`, `--output`), `--help` with examples, proper exit codes. PASS (planned).
+- UX Consistency: stable flags (`--from-date`, `--min-score`, `--dry-run`, `--output`), `--help` with examples, proper exit codes. PASS (planned).
 - Performance & Efficiency: budgets above; streaming/batching; no O(n²) over candidates. PASS (planned).
 - Reproducibility & Traceability: pin deps; record inputs, model, and versions in report. PASS (planned).
 
@@ -87,7 +87,7 @@ tests/
 
 ## Phase 0: Outline & Research
 1. Unknowns and decisions:
-   - Pub2Tools source: [NEEDS CLARIFICATION] exact endpoint/export and time filter (e.g., `--since 7d`).
+   - Pub2Tools source: [NEEDS CLARIFICATION] exact endpoint/export and time filter (e.g., `--from-date 7d`).
    - LLM details: use local `ollama` model (e.g., `llama3:8b`) with deterministic settings.
    - biotoolsSchema version: [NEEDS CLARIFICATION] target schema and required fields.
    - Evidence rules: default thresholds for LS and relevance scores.

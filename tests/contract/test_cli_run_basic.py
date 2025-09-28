@@ -11,7 +11,7 @@ def test_run_basic_creates_outputs(tmp_path):
     Contract assumptions:
     - CLI reads optional env `BIOTOOLS_ANNOTATE_INPUT` to use a local fixture
       (avoids network during tests).
-    - Command: `python -m biotoolsllmannotate run --since 7d --output ... --report ...`
+    - Command: `python -m biotoolsllmannotate run --from-date 7d --output ... --report ...`
     """
     out_payload = tmp_path / "payload.json"
     out_report = tmp_path / "report.jsonl"
@@ -28,7 +28,7 @@ def test_run_basic_creates_outputs(tmp_path):
             sys.executable,
             "-m",
             "biotoolsllmannotate",
-            "--since",
+            "--from-date",
             "7d",
             "--output",
             str(out_payload),

@@ -4,3 +4,8 @@ bin/pub2tools
 __pycache__/
 *.pyc
 out/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/

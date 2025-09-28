@@ -21,20 +21,18 @@ pub2tools:
   idf: https://github.com/edamontology/edamontology/edammap/raw/master/doc/biotools.idf
   idf_stemmed: https://github.com/edamontology/edamontology/edammap/raw/master/doc/biotools.stemmed.idf
   p2t_month: null
-  from_date: null
+  from_date: '2024-01-01'
   to_date: null
   selenium_firefox: null
   firefox_path: null
   p2t_cli: /custom/path/to/pub2tools
   output_dir: out/pub2tools
 pipeline:
-  since: '2024-01-01'
-  to_date: null
   min_score: 0.6
   limit: null
   dry_run: false
-  output: out/payload.json
-  report: out/report.jsonl
+  output: out/exports/biotools_payload.json
+  report: out/reports/assessment.jsonl
   model: llama3.2
   concurrency: 8
   input_path: null
@@ -100,7 +98,7 @@ scoring_prompt_template: 'Please evaluate this bioinformatics tool candidate for
             "biotoolsllmannotate",
             "--config",
             str(config_file),
-            "--since",
+            "--from-date",
             "7d",
             "--offline",  # Use offline mode to avoid LLM JSON parsing issues
             "--output",

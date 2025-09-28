@@ -16,14 +16,14 @@ pip install -e .[dev]
 ## Example Usage
 ```
 # Fetch, assess, improve, and emit payload + report
-biotools-annotate run --since 7d --min-score 0.6 \
+biotools-annotate run --from-date 7d --min-score 0.6 \
   --output out/payload.json --report out/report.jsonl
 
 # Dry run (no payload written)
-biotools-annotate run --since 1w --dry-run --report out/report.jsonl
+biotools-annotate run --from-date 1w --dry-run --report out/report.jsonl
 
 # Increase strictness and limit batch size
-biotools-annotate run --since 30d --min-score 0.8 --limit 200
+biotools-annotate run --from-date 30d --min-score 0.8 --limit 200
 ```
 
 ## Output

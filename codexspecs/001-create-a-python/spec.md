@@ -95,7 +95,7 @@ As a biotools curator, I want a CLI that fetches newly mined tool candidates fro
 *Clarifications resolved / remaining*
 - FR-016: The output MUST conform to the current biotoolsSchema as used in Pub2Tools `to_biotools.json` (validate via pydantic models). If schema versioning is required, document the chosen version in the report.
 - FR-017: LLM provider is local `ollama` with a lightweight instruct model; no external network required by default.
-- FR-018: Default cadence is monthly via Pub2Tools `--month` (e.g., 2025-08); ad-hoc windows remain supported via `--since` filter.
+- FR-018: Default cadence is monthly via Pub2Tools `--month` (e.g., 2025-08); ad-hoc windows remain supported via `--from-date` filter.
 - FR-019: EDAM annotations from Pub2Tools are used as initial suggestions; LLM-assisted improvement is best-effort and MUST not invent non-existent terms.
 - FR-020: Interaction with the bio.tools API (validation/upload) is out-of-scope for this feature; this tool only prepares JSON.
 

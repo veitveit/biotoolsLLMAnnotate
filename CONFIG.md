@@ -48,11 +48,11 @@ biotools-annotate --write-default-config
 - **Example**: `"2024-09"`
 
 #### `pub2tools.from_date` / `pub2tools.to_date`
-- **Type**: String (ISO-8601) or null
-- **Default**: `null`
+- **Type**: String (relative window like `7d` or ISO-8601) or null
+- **Default**: `"7d"` / `null`
 - **Description**: Date range for fetching candidates (alternative to `p2t_month`)
 - **CLI equivalent**: `--from-date`, `--to-date`
-- **Example**: `"2024-09-01T00:00:00Z"`
+- **Example**: `"2024-09-01"` or `"30d"`
 
 #### `pub2tools.selenium_firefox`
 - **Type**: Boolean or null
@@ -86,73 +86,42 @@ biotools-annotate --write-default-config
 
 ### Pipeline Configuration
 
-#### `pipeline.since`
-- **Type**: String (time specification)
-- **Default**: `"2024-01-01"`
-- **Description**: Start time for candidate selection
-- **CLI equivalent**: `--since`
-- **Formats**:
-  - ISO-8601: `"2024-09-01T00:00:00Z"`
-  - Relative: `"7d"`, `"30d"`, `"12h"`, `"2w"`, `"45m"`, `"30s"`
-  - Units: `d`=days, `w`=weeks, `h`=hours, `m`=minutes, `s`=seconds
-
-#### `pipeline.to_date`
-- **Type**: String (ISO-8601) or null
-- **Default**: `null` (uses current time)
-- **Description**: End time for candidate selection
-- **CLI equivalent**: `--to-date`
-- **Example**: `"2024-09-30T23:59:59Z"`
-
-#### `pipeline.min_score`
-- **Type**: Float (0.0-1.0)
-- **Default**: `0.6`
-- **Description**: Minimum score threshold for inclusion
-- **CLI equivalent**: `--min-score`
-- **Note**: Both `bio_score` and `documentation_score` must meet this threshold
-
-#### `pipeline.limit`
-- **Type**: Integer or null
-- **Default**: `null` (unlimited)
-- **Description**: Maximum number of candidates to process
-- **CLI equivalent**: `--limit`
-- **Example**: `100`
-
-#### `pipeline.dry_run`
-- **Type**: Boolean
-- **Default**: `true`
-- **Description**: Run assessment only, don't write payload
-- **CLI equivalent**: `--dry-run`
-
-#### `pipeline.offline`
-- **Type**: Boolean
-- **Default**: `false`
-- **Description**: Disable web/repository fetching
-- **CLI equivalent**: `--offline`
-
 #### `pipeline.output`
 - **Type**: String (path)
-- **Default**: `"out/payload.json"`
+- **Default**: `"out/exports/biotools_payload.json"`
 - **Description**: Output path for bio.tools payload JSON
 - **CLI equivalent**: `--output`
 - **Example**: `"results/payload.json"`
 
 #### `pipeline.report`
 - **Type**: String (path)
-- **Default**: `"out/report.jsonl"`
+- **Default**: `"out/reports/assessment.jsonl"`
 - **Description**: Output path for per-candidate JSONL report
 - **CLI equivalent**: `--report`
 - **Example**: `"results/report.jsonl"`
 
 #### `pipeline.updated_entries`
 - **Type**: String (path)
-- **Default**: `"out/updated_entries.json"`
+- **Default**: `"out/exports/biotools_entries.json"`
 - **Description**: Output path for the full biotoolsSchema payload containing accepted, enriched tool entries.
 - **CLI equivalent**: `--updated-entries`
 - **Example**: `"results/updated_entries.json"`
 
+#### `pipeline.enriched_cache`
+- **Type**: String (path)
+- **Default**: `"out/cache/enriched_candidates.json.gz"`
+- **Description**: Path for the gzipped cache of enriched candidates (compatible with `--enriched-cache` / `--resume-from-enriched`).
+- **Example**: `"cache/enriched.json.gz"`
+
+#### `pipeline.resume_from_enriched`
+- **Type**: Boolean
+- **Default**: `false`
+- **Description**: When `true`, skip ingestion/enrichment and start from the cache pointed to by `pipeline.enriched_cache` (same as passing `--resume-from-enriched`).
+- **CLI equivalent**: `--resume-from-enriched`
+
 #### `pipeline.payload_version`
 - **Type**: String
-- **Default**: `"0.8.1"`
+- **Default**: `"0.9.1"`
 - **Description**: Version string stored alongside the updated entries payload; defaults to the package version when omitted.
 
 #### `pipeline.input_path`
@@ -213,6 +182,25 @@ biotools-annotate --write-default-config
 - **Description**: Fetch open-access full text (truncated) when a PMCID is available.
 - **Note**: Even when full text cannot be retrieved, the first available full-text URL is attached as `publication_full_text_url`.
 
+### Homepage Scraping Enrichment
+
+#### `enrichment.homepage.enabled`
+- **Type**: Boolean
+- **Default**: `true`
+- **Description**: Toggle HTML scraping of each candidate homepage to discover documentation and repository links.
+- **Effect**: Disabled automatically when `--offline` or `--resume-from-enriched` is used.
+
+#### `enrichment.homepage.timeout`
+- **Type**: Integer/Float (seconds)
+- **Default**: `8`
+- **Description**: Network timeout applied to homepage requests.
+- **Example**: `5`
+
+#### `enrichment.homepage.user_agent`
+- **Type**: String
+- **Default**: `"biotoolsllmannotate/0.9.1 (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"`
+- **Description**: Custom User-Agent header for homepage scraping requests.
+
 #### `enrichment.europe_pmc.max_publications`
 - **Type**: Integer
 - **Default**: `1`
@@ -234,8 +222,9 @@ biotools-annotate --write-default-config
 - **Type**: String (multi-line)
 - **Description**: Custom prompt template for LLM scoring
 - **Note**: Advanced users can customize the scoring instructions
-- **Variables**: `{title}`, `{description}`, `{homepage}`, `{documentation}`, `{repository}`, `{tags}`, `{published_at}`, `{publication_abstract}`, `{publication_full_text}`
-- **Expected response keys**: `bio_score`, `documentation_score`, `concise_description`, `rationale`
+- **Variables**: `{title}`, `{description}`, `{homepage}`, `{homepage_status}`, `{homepage_error}`, `{documentation}`, `{documentation_keywords}`, `{repository}`, `{tags}`, `{published_at}`, `{publication_abstract}`, `{publication_full_text}`, `{publication_ids}`
+- **Expected response keys**: `bio_subscores`, `documentation_subscores`, `tool_name`, `homepage`, `publication_ids`, `concise_description`, `rationale`
+- **LLM contract**: Return `bio_subscores` and `documentation_subscores` as JSON objects keyed by rubric IDs (A1–A5, B1–B5) with exactly one of {0, 0.5, 1} values. The pipeline computes the average from these subscores and clamps to `[0.0, 1.0]` before persisting the final scores. Normalize publication identifiers to DOI:..., PMID:..., PMCID:... format.
 
 ## Environment Variables
 
@@ -284,7 +273,7 @@ pipeline:
 enrichment:
   europe_pmc:
     enabled: true
-    include_full_text: false
+    include_full_text: true
 
 logging:
   level: "DEBUG"
@@ -312,7 +301,7 @@ pipeline:
 Enable debug logging to troubleshoot issues:
 
 ```bash
-biotools-annotate run --verbose --since 1d
+biotools-annotate run --verbose --from-date 1d
 ```
 
 Or in config:
@@ -327,18 +316,15 @@ When migrating from command-line arguments to config file:
 
 | CLI Argument | Config Path |
 |-------------|-------------|
-| `--since 7d` | `pipeline.since: "7d"` |
-| `--min-score 0.8` | `pipeline.min_score: 0.8` |
 | `--model llama3.1` | `pipeline.model: "llama3.1"` |
 | `--concurrency 16` | `pipeline.concurrency: 16` |
-| `--offline` | `pipeline.offline: true` |
 | `--p2t-cli /path/to/pub2tools` | `pub2tools.p2t_cli: "/path/to/pub2tools"` |
 | `--p2t-cli "java -jar /path/to/jar"` | `pub2tools.p2t_cli: "java -jar /path/to/jar"` |
 
 ## Best Practices
 
 1. **Start simple**: Use default config and override specific parameters
-2. **Use relative time**: Prefer `"7d"` over specific dates for `since`
+2. **Use relative time**: Prefer `"7d"` over specific dates for `pub2tools.from_date`
 3. **Set reasonable limits**: Use `limit` for testing with large datasets
 4. **Enable logging**: Set `logging.file` for production use
 5. **Test configuration**: Use `--dry-run` to validate settings

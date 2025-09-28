@@ -4,6 +4,8 @@ pyproject.toml
 src/biotoolsllmannotate/__init__.py
 src/biotoolsllmannotate/__main__.py
 src/biotoolsllmannotate/config.py
+src/biotoolsllmannotate/metrics.py
+src/biotoolsllmannotate/validation.py
 src/biotoolsllmannotate.egg-info/PKG-INFO
 src/biotoolsllmannotate.egg-info/SOURCES.txt
 src/biotoolsllmannotate.egg-info/dependency_links.txt
