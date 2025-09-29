@@ -9,8 +9,10 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
+from ..version import __version__
+
 DEFAULT_USER_AGENT = (
-    "biotoolsllmannotate/0.9.1 (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"
+    f"biotoolsllmannotate/{__version__} (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"
 )
 
 DOCUMENTATION_KEYWORDS: tuple[str, ...] = (

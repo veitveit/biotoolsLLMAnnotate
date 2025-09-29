@@ -1,7 +1,7 @@
 typer[all]>=0.12
 beautifulsoup4>=4.12
 requests>=2.31
-pydantic>=2.7
+pydantic[email]>=2.7
 tenacity>=8.3
 rich>=13.7
 pyyaml>=6.0

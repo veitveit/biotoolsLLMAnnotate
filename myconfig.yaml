@@ -1,10 +1,10 @@
 pipeline:
   input_path: null
-  payload_version: 0.9.1
-  from_date: "2023-01-01"
-  to_date: "2023-01-15"
+  payload_version: "__VERSION__"
+  from_date: "2025-01-01"
+  to_date: "2025-01-02"
   resume_from_pub2tools: true
-  resume_from_enriched: false
+  resume_from_enriched: true
   resume_from_scoring: false
   min_bio_score: 0.6
   min_documentation_score: 0.6
@@ -29,7 +29,7 @@ enrichment:
   homepage:
     enabled: true
     timeout: 20
-  user_agent: biotoolsllmannotate/0.9.1 (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)
+  user_agent: biotoolsllmannotate/__VERSION__ (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)
 ollama:
   host: http://localhost:11434
   model: llama3.2

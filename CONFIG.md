@@ -96,8 +96,8 @@ biotools-annotate --write-default-config
 
 #### `pipeline.payload_version`
 - **Type**: String
-- **Default**: `"0.9.1"`
-- **Description**: Version string stored alongside the updated entries payload; defaults to the package version when omitted.
+- **Default**: `"__VERSION__"`
+- **Description**: Version string stored alongside the updated entries payload; the placeholder resolves to the installed package version.
 
 #### `pipeline.input_path`
 - **Type**: String (path) or null
@@ -209,8 +209,8 @@ biotools-annotate --write-default-config
 
 #### `enrichment.homepage.user_agent`
 - **Type**: String
-- **Default**: `"biotoolsllmannotate/0.9.1 (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"`
-- **Description**: Custom User-Agent header for homepage scraping requests.
+- **Default**: `"biotoolsllmannotate/__VERSION__ (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"`
+- **Description**: Custom User-Agent header for homepage scraping requests. The placeholder is replaced with the package version during configuration load.
 
 #### `enrichment.europe_pmc.max_publications`
 - **Type**: Integer

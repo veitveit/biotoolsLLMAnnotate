@@ -644,6 +644,14 @@ def _find_latest_pub2tools_export(*bases: Path) -> Path | None:
     return candidates[0][1]
 
 
+def _export_matches_time_period(path: Path, label: str) -> bool:
+    label_prefix = f"{label}_"
+    for part in path.parts:
+        if part == label or part.startswith(label_prefix):
+            return True
+    return False
+
+
 def _load_assessment_report(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as fh:
@@ -1073,12 +1081,14 @@ def execute_run(
                     "--resume-from-enriched requested but no enriched cache path configured"
                 )
                 set_status(0, "GATHER – cache resume skipped (no path)")
+                resume_from_enriched = False
             elif not cache_path.exists():
                 logger.warning(
                     "--resume-from-enriched requested but cache file not found: %s",
                     cache_path,
                 )
                 set_status(0, "GATHER – cache resume skipped (missing file)")
+                resume_from_enriched = False
             else:
                 try:
                     candidates = _load_enriched_candidates(cache_path)
@@ -1101,6 +1111,7 @@ def execute_run(
                     set_status(0, "GATHER – cache resume failed, refetching")
                     candidates = []
                     resumed = False
+                    resume_from_enriched = False
 
         if not resumed:
             env_input = input_path or os.environ.get("BIOTOOLS_ANNOTATE_INPUT")
@@ -1115,6 +1126,14 @@ def execute_run(
                     base_output_root / "pipeline" / "pub2tools",
                     time_period_root,
                 )
+                if resume_export_path and not _export_matches_time_period(
+                    resume_export_path, time_period_label
+                ):
+                    logger.info(
+                        "--resume-from-pub2tools ignoring cached export %s (mismatched time period)",
+                        resume_export_path,
+                    )
+                    resume_export_path = None
                 if resume_export_path is None:
                     logger.info(
                         "--resume-from-pub2tools requested but no cached to_biotools.json was found; attempting fresh ingestion"
@@ -1140,6 +1159,7 @@ def execute_run(
                     )
                     env_input = None
                     candidates = []
+                    resume_export_path = None
             elif env_input:
                 logger.info(
                     f"INPUT file %s -> %d candidates", env_input, len(candidates)
@@ -1302,6 +1322,8 @@ def execute_run(
                     "ENRICH completed – Europe PMC metadata added where available"
                 )
                 set_status(2, "ENRICH – Europe PMC metadata added", clear_progress=True)
+                if enriched_cache and not resume_from_enriched:
+                    _save_enriched_candidates(candidates, Path(enriched_cache), logger)
             except Exception as exc:
                 logger.warning(f"Europe PMC enrichment skipped due to error: {exc}")
                 set_status(

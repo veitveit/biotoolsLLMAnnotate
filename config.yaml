@@ -11,7 +11,7 @@ pub2tools:
   fetcher_threads: 4
 pipeline:
   input_path: null
-  payload_version: 0.9.1
+  payload_version: "__VERSION__"
   resume_from_enriched: false
   from_date: 7d
   to_date: null
@@ -36,7 +36,7 @@ enrichment:
   homepage:
     enabled: true
     timeout: 8
-  user_agent: biotoolsllmannotate/0.9.1 (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)
+  user_agent: biotoolsllmannotate/__VERSION__ (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)
 scoring_prompt_template: |
   You are evaluating whether a software resource is worth getting registered in bio.tools, the registry for software resources in the life sciences.
 

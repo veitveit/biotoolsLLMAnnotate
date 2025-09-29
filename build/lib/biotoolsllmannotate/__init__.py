@@ -6,6 +6,6 @@ This file defines minimal package metadata only; CLI and modules are added in
 subsequent tasks.
 """
 
-__all__ = []
+from .version import __version__
 
-__version__ = "0.9.1"
+__all__ = ["__version__"]

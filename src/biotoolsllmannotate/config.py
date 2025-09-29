@@ -1,6 +1,19 @@
+import copy
 import os
 import yaml
 from pathlib import Path
+
+from .version import __version__
+
+
+def _replace_version_placeholders(value):
+    if isinstance(value, dict):
+        return {k: _replace_version_placeholders(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_replace_version_placeholders(item) for item in value]
+    if isinstance(value, str) and "__VERSION__" in value:
+        return value.replace("__VERSION__", __version__)
+    return value
 
 DEFAULT_CONFIG_YAML = {
     "pub2tools": {
@@ -17,7 +30,7 @@ DEFAULT_CONFIG_YAML = {
     },
     "pipeline": {
         "input_path": None,
-        "payload_version": "0.9.1",
+    "payload_version": __version__,
         "resume_from_enriched": False,
         "from_date": "7d",
         "to_date": None,
@@ -48,7 +61,7 @@ DEFAULT_CONFIG_YAML = {
         "homepage": {
             "enabled": True,
             "timeout": 8,
-            "user_agent": "biotoolsllmannotate/0.9.1 (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)",
+            "user_agent": f"biotoolsllmannotate/{__version__} (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)",
         },
     },
     "scoring_prompt_template": """You are evaluating whether a software resource is worth getting registered in bio.tools, the registry for software resources in the life sciences.
@@ -170,7 +183,9 @@ def get_config_yaml(config_path=None, validate=True):
         validate: Whether to validate the configuration (default: True).
     """
     config = load_yaml_config(config_path)
-    final_config = config or DEFAULT_CONFIG_YAML.copy()
+    final_config = copy.deepcopy(DEFAULT_CONFIG_YAML) if not config else config
+    final_config = _replace_version_placeholders(final_config)
+    final_config = _replace_version_placeholders(final_config)
 
     if validate:
         # Import here to avoid circular imports

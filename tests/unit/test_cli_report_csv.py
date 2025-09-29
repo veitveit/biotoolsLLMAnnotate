@@ -1,6 +1,8 @@
 import csv
 import gzip
 import json
+import os
+import time
 
 
 class DummyScorer:
@@ -203,7 +205,9 @@ def test_execute_run_writes_updated_entries_file(tmp_path, monkeypatch):
     assert payload_path.exists()
     assert updated_path.exists()
     data = json.loads(updated_path.read_text())
-    assert data["version"] == "0.9.1"
+    from biotoolsllmannotate.version import __version__
+
+    assert data["version"] == __version__
     assert len(data["entries"]) == 1
     entry = data["entries"][0]
     assert entry["name"] == "Example Tool"
@@ -352,6 +356,80 @@ def test_resume_from_pub2tools_export(tmp_path, monkeypatch):
     assert isinstance(payload, list)
     assert len(payload) == 1
     assert payload[0]["name"] == "Bioinformatics Resume Tool"
+
+
+def test_resume_from_pub2tools_ignores_other_ranges(tmp_path, monkeypatch):
+    from biotoolsllmannotate.cli.run import execute_run
+    import biotoolsllmannotate.assess.scorer as scorer_module
+
+    monkeypatch.setattr(
+        scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
+    )
+
+    out_root = tmp_path / "out"
+    target_label = "range_2024-05-01_to_2024-05-31"
+    target_dir = out_root / target_label
+    other_dir = out_root / "range_2024-04-01_to_2024-04-30"
+
+    target_export = target_dir / "pub2tools"
+    target_export.mkdir(parents=True, exist_ok=True)
+    target_path = target_export / "to_biotools.json"
+    target_path.write_text(
+        json.dumps(
+            [
+                {
+                    "title": "Target Candidate",
+                    "description": "Correct range",
+                    "urls": ["https://target.example"],
+                    "publication": [{"pmid": "999"}],
+                        "tags": ["bioinformatics"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    past_time = time.time() - 3600
+    os.utime(target_path, (past_time, past_time))
+
+    other_export = other_dir / "pub2tools"
+    other_export.mkdir(parents=True, exist_ok=True)
+    other_path = other_export / "to_biotools.json"
+    other_path.write_text(
+        json.dumps(
+            [
+                {
+                    "title": "Other Candidate",
+                    "description": "Different range",
+                    "urls": ["https://other.example"],
+                    "publication": [{"pmid": "111"}],
+                        "tags": ["bioinformatics"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    recent_time = time.time()
+    os.utime(other_path, (recent_time, recent_time))
+
+    execute_run(
+        from_date="2024-05-01",
+        to_date="2024-05-31",
+        min_bio_score=0.6,
+        min_doc_score=0.6,
+        dry_run=False,
+        resume_from_pub2tools=True,
+        offline=True,
+        show_progress=False,
+        model="llama3.2",
+        concurrency=1,
+        output_root=out_root,
+    )
+
+    payload_path = target_dir / "exports" / "biotools_payload.json"
+    assert payload_path.exists()
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert len(payload) == 1
+    assert payload[0]["name"] == "Target Candidate"
 
 
 def test_resume_from_scoring(tmp_path, monkeypatch):
