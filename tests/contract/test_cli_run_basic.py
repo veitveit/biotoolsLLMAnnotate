@@ -11,11 +11,8 @@ def test_run_basic_creates_outputs(tmp_path):
     Contract assumptions:
     - CLI reads optional env `BIOTOOLS_ANNOTATE_INPUT` to use a local fixture
       (avoids network during tests).
-    - Command: `python -m biotoolsllmannotate run --from-date 7d --output ... --report ...`
+    - Command: `python -m biotoolsllmannotate run --from-date 7d`
     """
-    out_payload = tmp_path / "payload.json"
-    out_report = tmp_path / "report.jsonl"
-
     env = os.environ.copy()
     repo_root = Path(__file__).resolve().parents[2]
     env["PYTHONPATH"] = str(repo_root / "src")
@@ -30,19 +27,22 @@ def test_run_basic_creates_outputs(tmp_path):
             "biotoolsllmannotate",
             "--from-date",
             "7d",
-            "--output",
-            str(out_payload),
-            "--report",
-            str(out_report),
             "--offline",
         ],
         env=env,
         capture_output=True,
         text=True,
         timeout=30,
+        cwd=str(tmp_path),
     )
 
     assert proc.returncode == 0
+    out_dir = tmp_path / "out"
+    time_period_dirs = list(out_dir.glob("range_*"))
+    assert len(time_period_dirs) == 1
+    run_dir = time_period_dirs[0]
+    out_payload = run_dir / "exports" / "biotools_payload.json"
+    out_report = run_dir / "reports" / "assessment.jsonl"
     assert out_payload.exists()
     assert out_report.exists()
     # payload should be JSON (likely an array)

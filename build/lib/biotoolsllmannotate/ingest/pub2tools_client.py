@@ -201,6 +201,7 @@ def fetch_via_cli(
     edam_owl: str = "http://edamontology.org/EDAM.owl",
     idf: str = "https://github.com/edamontology/edammap/raw/master/doc/biotools.idf",
     idf_stemmed: str = "https://github.com/edamontology/edammap/raw/master/doc/biotools.stemmed.idf",
+    base_output_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Invoke a Pub2Tools CLI to fetch recent candidates as JSON.
 
@@ -229,9 +230,20 @@ def fetch_via_cli(
         _iso_utc(to_date)[:10] if to_date else _iso_utc(datetime.now(UTC))[:10]
     )
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path("out/pub2tools") / f"run_{timestamp}"
+    range_prefix = f"range_{from_date}_to_{to_date_str}"
+    unique_suffix = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    if base_output_dir:
+        output_dir = Path(base_output_dir)
+    else:
+        base_dir = Path("out/pub2tools")
+        output_dir = base_dir / f"{range_prefix}_{unique_suffix}"
     output_dir.mkdir(parents=True, exist_ok=True)
+    existing_to_biotools = output_dir / "to_biotools.json"
+    try:
+        if existing_to_biotools.exists():
+            existing_to_biotools.unlink()
+    except OSError:
+        pass
     cmd = cli_parts + [
         "-all",
         str(output_dir),

@@ -4,13 +4,17 @@ import csv
 import gzip
 import json
 import os
+import shutil
 import sys
+from time import perf_counter
 from collections.abc import Iterable
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Any
+
+import yaml
 
 import typer
 from rich.console import Console
@@ -263,11 +267,15 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
 
 
 def include_candidate(
-    scores: dict[str, Any], min_score: float, has_homepage: bool
+    scores: dict[str, Any],
+    *,
+    min_bio_score: float,
+    min_doc_score: float,
+    has_homepage: bool,
 ) -> bool:
     return (
-        scores.get("bio_score", 0.0) >= min_score
-        and scores.get("documentation_score", 0.0) >= min_score
+        scores.get("bio_score", 0.0) >= min_bio_score
+        and scores.get("documentation_score", 0.0) >= min_doc_score
         and has_homepage
     )
 
@@ -320,47 +328,55 @@ def _publication_identifiers(candidate: dict[str, Any]) -> list[str]:
 ALLOWED_ENTRY_FIELDS = set(BioToolsEntry.model_fields.keys())
 
 
-def _prepare_output_structure(logger) -> None:
-    base = Path("out")
+def _prepare_output_structure(logger, base: Path | str = Path("out")) -> None:
+    base_path = Path(base)
+    base_path.mkdir(parents=True, exist_ok=True)
     for folder in ("exports", "reports", "cache", "logs", "pub2tools"):
-        (base / folder).mkdir(parents=True, exist_ok=True)
+        (base_path / folder).mkdir(parents=True, exist_ok=True)
+
+    legacy_root = Path("out")
+    if base_path.resolve() != legacy_root.resolve():
+        return
 
     migrations = [
-        (Path("out/payload.json"), base / "exports" / "biotools_payload.json"),
-        (Path("out/report.jsonl"), base / "reports" / "assessment.jsonl"),
-        (Path("out/report.csv"), base / "reports" / "assessment.csv"),
-        (Path("out/updated_entries.json"), base / "exports" / "biotools_entries.json"),
+        (legacy_root / "payload.json", base_path / "exports" / "biotools_payload.json"),
+        (legacy_root / "report.jsonl", base_path / "reports" / "assessment.jsonl"),
+        (legacy_root / "report.csv", base_path / "reports" / "assessment.csv"),
         (
-            Path("out/enriched_candidates.json.gz"),
-            base / "cache" / "enriched_candidates.json.gz",
+            legacy_root / "updated_entries.json",
+            base_path / "exports" / "biotools_entries.json",
         ),
-        (Path("out/ollama.log"), base / "logs" / "ollama.log"),
+        (
+            legacy_root / "enriched_candidates.json.gz",
+            base_path / "cache" / "enriched_candidates.json.gz",
+        ),
+        (legacy_root / "ollama.log", base_path / "logs" / "ollama.log"),
     ]
 
-    pipeline = base / "pipeline"
+    pipeline = base_path / "pipeline"
     migrations.extend(
         [
             (
                 pipeline / "exports" / "biotools_payload.json",
-                base / "exports" / "biotools_payload.json",
+                base_path / "exports" / "biotools_payload.json",
             ),
             (
                 pipeline / "exports" / "biotools_entries.json",
-                base / "exports" / "biotools_entries.json",
+                base_path / "exports" / "biotools_entries.json",
             ),
             (
                 pipeline / "reports" / "assessment.jsonl",
-                base / "reports" / "assessment.jsonl",
+                base_path / "reports" / "assessment.jsonl",
             ),
             (
                 pipeline / "reports" / "assessment.csv",
-                base / "reports" / "assessment.csv",
+                base_path / "reports" / "assessment.csv",
             ),
             (
                 pipeline / "cache" / "enriched_candidates.json.gz",
-                base / "cache" / "enriched_candidates.json.gz",
+                base_path / "cache" / "enriched_candidates.json.gz",
             ),
-            (pipeline / "logs" / "ollama.log", base / "logs" / "ollama.log"),
+            (pipeline / "logs" / "ollama.log", base_path / "logs" / "ollama.log"),
         ]
     )
 
@@ -382,7 +398,7 @@ def _prepare_output_structure(logger) -> None:
             )
 
     legacy_pub2tools = pipeline / "pub2tools"
-    target_pub2tools = base / "pub2tools"
+    target_pub2tools = base_path / "pub2tools"
     if legacy_pub2tools.exists():
         target_pub2tools.mkdir(parents=True, exist_ok=True)
         try:
@@ -588,6 +604,108 @@ def _load_enriched_candidates(path: Path) -> list[dict[str, Any]]:
     return [c for c in data if isinstance(c, dict)]
 
 
+def _find_latest_pub2tools_export(*bases: Path) -> Path | None:
+    candidates: list[tuple[float, Path]] = []
+    for base in bases:
+        if base is None:
+            continue
+        path = Path(base)
+        if not path.exists():
+            continue
+        if path.is_file() and path.name == "to_biotools.json":
+            try:
+                candidates.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+            continue
+        direct = path / "to_biotools.json"
+        if direct.exists():
+            try:
+                candidates.append((direct.stat().st_mtime, direct))
+            except OSError:
+                pass
+        try:
+            children = sorted(path.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            if not child.is_dir():
+                continue
+            export_path = child / "to_biotools.json"
+            if not export_path.exists():
+                continue
+            try:
+                candidates.append((export_path.stat().st_mtime, export_path))
+            except OSError:
+                continue
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _load_assessment_report(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as fh:
+        for idx, line in enumerate(fh, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError as exc:  # pragma: no cover - rare corrupt file
+                raise ValueError(
+                    f"Invalid assessment row at {path}:{idx}: {exc}"
+                ) from exc
+            if isinstance(data, dict):
+                rows.append(data)
+    return rows
+
+
+def _build_candidate_index(
+    candidates: Iterable[dict[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    by_title: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in ("id", "tool_id", "biotools_id", "biotoolsID", "identifier"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                by_id.setdefault(value.strip(), candidate)
+        title = candidate.get("title") or candidate.get("name")
+        if isinstance(title, str) and title.strip():
+            by_title.setdefault(title.strip(), candidate)
+    return by_id, by_title
+
+
+def _match_candidate_from_report(
+    row: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+    by_title: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    for key in ("id", "tool_id", "biotools_id", "biotoolsID", "identifier"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            candidate = by_id.pop(value.strip(), None)
+            if candidate is not None:
+                title = candidate.get("title") or candidate.get("name")
+                if isinstance(title, str) and title.strip():
+                    by_title.pop(title.strip(), None)
+                return candidate
+    title = row.get("title")
+    if isinstance(title, str) and title.strip():
+        candidate = by_title.pop(title.strip(), None)
+        if candidate is not None:
+            for key in ("id", "tool_id", "biotools_id", "biotoolsID", "identifier"):
+                value = candidate.get(key)
+                if isinstance(value, str) and value.strip():
+                    by_id.pop(value.strip(), None)
+            return candidate
+    return None
+
+
 def _resolve_homepage(
     candidate: dict[str, Any], scores: dict[str, Any], selected_homepage: str
 ) -> str:
@@ -608,11 +726,12 @@ def _resolve_homepage(
 def execute_run(
     from_date: str | None = None,
     to_date: str | None = None,
-    min_score: float = 0.6,
+    min_bio_score: float = 0.6,
+    min_doc_score: float = 0.6,
     limit: int | None = None,
     dry_run: bool = False,
-    output: Path = Path("out/exports/biotools_payload.json"),
-    report: Path = Path("out/reports/assessment.jsonl"),
+    output: Path | None = None,
+    report: Path | None = None,
     model: str | None = None,
     concurrency: int = 8,
     input_path: str | None = None,
@@ -627,6 +746,10 @@ def execute_run(
     config_data: dict[str, Any] | None = None,
     enriched_cache: Path | None = None,
     resume_from_enriched: bool = False,
+    resume_from_pub2tools: bool = False,
+    resume_from_scoring: bool = False,
+    config_file_path: Path | None = None,
+    output_root: Path | None = None,
 ) -> None:
     from biotoolsllmannotate.io.logging import get_logger, setup_logging
 
@@ -799,18 +922,138 @@ def execute_run(
         fetch_from_dt = parse_since(fetch_from_label)
         fetch_to_dt = parse_since(to_date) if to_date else None
 
+        base_output_root = Path(output_root) if output_root is not None else Path("out")
+
+        from_label_date = fetch_from_dt.date().isoformat()
+        to_label_date = (
+            fetch_to_dt.date().isoformat()
+            if fetch_to_dt
+            else datetime.now(UTC).date().isoformat()
+        )
+        time_period_label = f"range_{from_label_date}_to_{to_label_date}"
+        time_period_root = base_output_root / time_period_label
+        time_period_root_abs = time_period_root.resolve()
+        base_output_root_abs = base_output_root.resolve()
+
+        if output is None:
+            output = base_output_root / "exports" / "biotools_payload.json"
+        if report is None:
+            report = base_output_root / "reports" / "assessment.jsonl"
+        if updated_entries is None:
+            updated_entries = base_output_root / "exports" / "biotools_entries.json"
+        if enriched_cache is None:
+            enriched_cache = base_output_root / "cache" / "enriched_candidates.json.gz"
+
+        def _rebase_to_time_period(raw: Path | str | None) -> Path | None:
+            if raw is None:
+                return None
+            path_obj = raw if isinstance(raw, Path) else Path(raw)
+            abs_path = path_obj if path_obj.is_absolute() else (Path.cwd() / path_obj)
+            if abs_path.is_relative_to(time_period_root_abs):
+                return abs_path
+            if not abs_path.is_relative_to(base_output_root_abs):
+                return abs_path if path_obj.is_absolute() else path_obj
+            rel = abs_path.relative_to(base_output_root_abs)
+            return time_period_root / rel
+
+        output_path = _rebase_to_time_period(output)
+        report_path = _rebase_to_time_period(report)
+        updated_entries_path = _rebase_to_time_period(updated_entries)
+        enriched_cache_path = _rebase_to_time_period(enriched_cache)
+
+        if output_path is None or report_path is None:
+            raise ValueError("Output and report paths must resolve to valid locations")
+
+        output = Path(output_path)
+        report = Path(report_path)
+        updated_entries = Path(updated_entries_path) if updated_entries_path else None
+        enriched_cache = Path(enriched_cache_path) if enriched_cache_path else None
+
+        cached_assessment_rows: list[dict[str, Any]] | None = None
+        if resume_from_scoring:
+            if report.exists():
+                try:
+                    cached_assessment_rows = _load_assessment_report(report)
+                    if cached_assessment_rows:
+                        logger.info(
+                            "♻️ Resumed scoring decisions from cached assessment %s with %d rows",
+                            report,
+                            len(cached_assessment_rows),
+                        )
+                    else:
+                        logger.warning(
+                            "--resume-from-scoring requested but cached assessment %s contained no rows; rerunning scoring",
+                            report,
+                        )
+                        cached_assessment_rows = None
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to read cached assessment %s: %s; rerunning scoring",
+                        report,
+                        exc,
+                    )
+                    cached_assessment_rows = None
+            else:
+                logger.warning(
+                    "--resume-from-scoring requested but assessment report not found: %s",
+                    report,
+                )
+
+        time_period_root.mkdir(parents=True, exist_ok=True)
+        for folder in ("exports", "reports", "cache", "logs", "pub2tools"):
+            (time_period_root / folder).mkdir(parents=True, exist_ok=True)
+
+        logging_cfg = config_data.get("logging")
+        if not isinstance(logging_cfg, dict):
+            logging_cfg = {}
+            config_data["logging"] = logging_cfg
+        llm_log_value = logging_cfg.get("llm_log")
+        llm_log_path = (
+            _rebase_to_time_period(llm_log_value)
+            if llm_log_value is not None
+            else time_period_root / "logs" / "ollama.log"
+        )
+        logging_cfg["llm_log"] = str(llm_log_path)
+
+        config_snapshot_path: Path | None = None
+        if config_file_path is not None:
+            cfg_source = Path(config_file_path)
+            if cfg_source.exists():
+                try:
+                    dest = time_period_root / cfg_source.name
+                    shutil.copy2(cfg_source, dest)
+                    config_snapshot_path = dest
+                except Exception as exc:
+                    logger.warning("Failed to copy config file %s: %s", cfg_source, exc)
+        if config_snapshot_path is None:
+            dest = time_period_root / "config.generated.yaml"
+            try:
+                with dest.open("w", encoding="utf-8") as fh:
+                    yaml.safe_dump(config_data, fh, sort_keys=False)
+                config_snapshot_path = dest
+            except Exception as exc:
+                logger.warning("Failed to record configuration for run: %s", exc)
+
         logger.info("🚀 Starting biotoolsLLMAnnotate pipeline run")
         logger.info(
             f"   📅 Pub2Tools fetch range: {fetch_from_label} to {to_date or 'now'}"
         )
-        logger.info(f"   🎯 Min score: {min_score}, Limit: {limit or 'unlimited'}")
+        logger.info(
+            "   🎯 Min scores → bio: %s, documentation: %s, Limit: %s",
+            f"{min_bio_score:.2f}",
+            f"{min_doc_score:.2f}",
+            limit or "unlimited",
+        )
         logger.info(f"   📊 Output: {output}, Report: {report}")
         logger.info(f"   🤖 Model: {model or 'default'}, Concurrency: {concurrency}")
+        logger.info(f"   🗂️ Time period folder: {time_period_root}")
+        if config_snapshot_path:
+            logger.info(f"   📄 Config snapshot stored at {config_snapshot_path}")
         logger.info(
             f"   {'🔌 Offline mode' if offline else '🌐 Online mode (will fetch from Pub2Tools if needed)'}"
         )
         set_status(0, "GATHER – preparing input sources")
-        _prepare_output_structure(logger)
+        _prepare_output_structure(logger, base_output_root)
         logger.info(step_msg(1, "Gather Pub2Tools candidates or load cached input"))
 
         cache_path: Path | None
@@ -863,8 +1106,41 @@ def execute_run(
             env_input = input_path or os.environ.get("BIOTOOLS_ANNOTATE_INPUT")
             if not env_input:
                 env_input = os.environ.get("BIOTOOLS_ANNOTATE_JSON")
+            resume_export_path: Path | None = None
+            if resume_from_pub2tools and not env_input:
+                resume_export_path = _find_latest_pub2tools_export(
+                    time_period_root / "pub2tools",
+                    base_output_root / "pub2tools",
+                    time_period_root / "pipeline" / "pub2tools",
+                    base_output_root / "pipeline" / "pub2tools",
+                    time_period_root,
+                )
+                if resume_export_path is None:
+                    logger.info(
+                        "--resume-from-pub2tools requested but no cached to_biotools.json was found; attempting fresh ingestion"
+                    )
+                else:
+                    env_input = str(resume_export_path)
             candidates = load_candidates(env_input)
-            if env_input:
+            if resume_export_path is not None:
+                if candidates:
+                    logger.info(
+                        "♻️ Resumed from cached Pub2Tools export %s with %d candidates",
+                        resume_export_path,
+                        len(candidates),
+                    )
+                    set_status(
+                        0,
+                        f"GATHER – reused {len(candidates)} candidates from Pub2Tools cache",
+                    )
+                else:
+                    logger.warning(
+                        "--resume-from-pub2tools requested but cached export %s was empty or invalid; falling back to Pub2Tools fetch",
+                        resume_export_path,
+                    )
+                    env_input = None
+                    candidates = []
+            elif env_input:
                 logger.info(
                     f"INPUT file %s -> %d candidates", env_input, len(candidates)
                 )
@@ -894,6 +1170,7 @@ def execute_run(
                         or "https://github.com/edamontology/edammap/raw/master/doc/biotools.idf",
                         idf_stemmed=idf_stemmed
                         or "https://github.com/edamontology/edammap/raw/master/doc/biotools.stemmed.idf",
+                        base_output_dir=time_period_root / "pub2tools",
                     )
                     logger.info(
                         "FETCH complete – %d candidates retrieved from Pub2Tools",
@@ -1057,77 +1334,79 @@ def execute_run(
         else:
             set_status(3, f"SCORE – preparing {total_candidates} candidates")
             update_progress(3, 0, total_candidates)
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        scoring_resumed = bool(cached_assessment_rows)
+        if scoring_resumed and not candidates:
+            logger.warning(
+                "--resume-from-scoring requested but no enriched candidates were available; rerunning scoring"
+            )
+            scoring_resumed = False
 
         score_fallbacks = {"llm": 0, "health": 0}
+        score_duration = 0.0
+        total_scored = 0
+        accepted_count = 0
+        rejected_count = 0
 
-        def heuristic_score_one(c: dict[str, Any]):
-            urls = [str(u) for u in (c.get("urls") or [])]
-            homepage = c.get("homepage") or primary_homepage(urls) or ""
-            publication_ids = _publication_identifiers(c)
-            if publication_ids:
-                c.setdefault("publication_ids", publication_ids)
-            candidate_id = (
-                c.get("id")
-                or c.get("tool_id")
-                or c.get("biotools_id")
-                or c.get("biotoolsID")
-                or c.get("identifier")
-                or ""
-            )
-            title = (
-                c.get("title")
-                or c.get("name")
-                or c.get("tool_title")
-                or c.get("display_title")
-                or ""
-            )
-            scores = simple_scores(c)
-            scores.setdefault("model", "heuristic")
-            include = include_candidate(
-                scores, min_score=min_score, has_homepage=bool(homepage)
-            )
-            decision = {
-                "id": str(candidate_id),
-                "title": str(title),
-                "homepage": homepage,
-                "publication_ids": publication_ids,
-                "scores": scores,
-                "include": include,
-            }
-            return (decision, c, homepage, include)
-
-        use_llm = not offline
-        scorer = None
-
-        if use_llm:
-            from biotoolsllmannotate.assess.scorer import Scorer
-
-            scorer = Scorer(model=model, config=config_data)
-            client = getattr(scorer, "client", None)
-            if client is not None and hasattr(client, "ping"):
-                healthy, health_error = client.ping()
-            else:  # pragma: no cover - only hit in heavily mocked tests
-                healthy, health_error = True, None
-            if not healthy:
-                score_fallbacks["health"] = 1
-                use_llm = False
-                logger.warning(
-                    "LLM health check failed (%s). Using heuristic scoring for this run; consider --offline if repeating.",
-                    health_error,
+        if scoring_resumed:
+            by_id, by_title = _build_candidate_index(candidates)
+            unmatched_report_rows = 0
+            for cached_row in cached_assessment_rows or []:
+                row = deepcopy(cached_row)
+                scores = row.get("scores") or {}
+                homepage = str(row.get("homepage") or "").strip()
+                candidate = _match_candidate_from_report(row, by_id, by_title)
+                if candidate is None:
+                    include = include_candidate(
+                        scores,
+                        min_bio_score=min_bio_score,
+                        min_doc_score=min_doc_score,
+                        has_homepage=bool(homepage),
+                    )
+                    row["include"] = include
+                    unmatched_report_rows += 1
+                    report_rows.append(row)
+                    continue
+                urls = [str(u) for u in (candidate.get("urls") or [])]
+                if not homepage:
+                    homepage = candidate.get("homepage") or primary_homepage(urls) or ""
+                include = include_candidate(
+                    scores,
+                    min_bio_score=min_bio_score,
+                    min_doc_score=min_doc_score,
+                    has_homepage=bool(homepage),
                 )
-                set_status(3, "SCORE – heuristic fallback (LLM unavailable)")
-
-        if not use_llm:
-            if offline and total_candidates:
-                set_status(3, "SCORE – heuristic scoring (offline mode)")
-
-            def score_one(c):
-                return heuristic_score_one(c)
-
+                row["homepage"] = homepage
+                row["include"] = include
+                report_rows.append(row)
+                if include:
+                    payload.append(to_entry(candidate, homepage))
+                    accepted_records.append((candidate, scores, homepage))
+            total_scored = len(report_rows)
+            accepted_count = len(accepted_records)
+            rejected_count = max(total_scored - accepted_count, 0)
+            score_duration = 0.0
+            if unmatched_report_rows:
+                logger.warning(
+                    "Resume scoring skipped %d cached assessment rows because no matching enriched candidate was found",
+                    unmatched_report_rows,
+                )
+            logger.info(
+                "RESUME scoring reused %d decisions (%d accepted, %d rejected)",
+                total_scored,
+                accepted_count,
+                rejected_count,
+            )
+            set_status(
+                3,
+                f"SCORE – reused cached assessment ({accepted_count} accepted, {rejected_count} rejected)",
+                clear_progress=True,
+            )
+            logger.info("TIMING score_elapsed_seconds=%.3f", score_duration)
         else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            def score_one(c):
+            def heuristic_score_one(c: dict[str, Any]):
                 urls = [str(u) for u in (c.get("urls") or [])]
                 homepage = c.get("homepage") or primary_homepage(urls) or ""
                 publication_ids = _publication_identifiers(c)
@@ -1148,19 +1427,13 @@ def execute_run(
                     or c.get("display_title")
                     or ""
                 )
-                try:
-                    scores = scorer.score_candidate(c)
-                except Exception as exc:
-                    score_fallbacks["llm"] += 1
-                    logger.warning(
-                        "LLM scoring failed for '%s': %s. Using heuristic backup; rerun with --offline or check Ollama service.",
-                        title or candidate_id or "<unknown>",
-                        exc,
-                    )
-                    set_status(3, "SCORE – temporary LLM failure, heuristics applied")
-                    return heuristic_score_one(c)
+                scores = simple_scores(c)
+                scores.setdefault("model", "heuristic")
                 include = include_candidate(
-                    scores, min_score=min_score, has_homepage=bool(homepage)
+                    scores,
+                    min_bio_score=min_bio_score,
+                    min_doc_score=min_doc_score,
+                    has_homepage=bool(homepage),
                 )
                 decision = {
                     "id": str(candidate_id),
@@ -1172,47 +1445,131 @@ def execute_run(
                 }
                 return (decision, c, homepage, include)
 
-        if total_candidates:
-            update_interval = max(1, total_candidates // 20)
-            processed = 0
-            with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                futures = [executor.submit(score_one, c) for c in candidates]
-                for fut in as_completed(futures):
-                    decision, c, homepage, include = fut.result()
-                    processed += 1
-                    report_rows.append(decision)
-                    scores = decision.get("scores", {})
-                    if include:
-                        payload.append(to_entry(c, homepage))
-                        accepted_records.append((c, scores, homepage))
-                    update_progress(3, processed, total_candidates)
-                    if (
-                        processed % update_interval == 0
-                        or processed == total_candidates
-                    ):
-                        set_status(
-                            3,
-                            f"SCORE – processed {processed}/{total_candidates} candidates",
-                        )
-        else:
-            processed = 0
+            use_llm = not offline
+            scorer = None
 
-        accepted_count = len(accepted_records)
-        total_scored = len(candidates)
-        rejected_count = max(total_scored - accepted_count, 0)
-        logger.info(
-            "SUMMARY score=%d accepted=%d rejected=%d llm_fallbacks=%d llm_health_fail=%d",
-            total_scored,
-            accepted_count,
-            rejected_count,
-            score_fallbacks.get("llm", 0),
-            score_fallbacks.get("health", 0),
-        )
-        set_status(
-            3,
-            f"SCORE – complete ({accepted_count} accepted, {rejected_count} rejected)",
-            clear_progress=True,
-        )
+            if use_llm:
+                from biotoolsllmannotate.assess.scorer import Scorer
+
+                scorer = Scorer(model=model, config=config_data)
+                client = getattr(scorer, "client", None)
+                if client is not None and hasattr(client, "ping"):
+                    healthy, health_error = client.ping()
+                else:  # pragma: no cover - only hit in heavily mocked tests
+                    healthy, health_error = True, None
+                if not healthy:
+                    score_fallbacks["health"] = 1
+                    use_llm = False
+                    logger.warning(
+                        "LLM health check failed (%s). Using heuristic scoring for this run; consider --offline if repeating.",
+                        health_error,
+                    )
+                    set_status(3, "SCORE – heuristic fallback (LLM unavailable)")
+
+            if not use_llm:
+                if offline and total_candidates:
+                    set_status(3, "SCORE – heuristic scoring (offline mode)")
+
+                def score_one(c):
+                    return heuristic_score_one(c)
+
+            else:
+
+                def score_one(c):
+                    urls = [str(u) for u in (c.get("urls") or [])]
+                    homepage = c.get("homepage") or primary_homepage(urls) or ""
+                    publication_ids = _publication_identifiers(c)
+                    if publication_ids:
+                        c.setdefault("publication_ids", publication_ids)
+                    candidate_id = (
+                        c.get("id")
+                        or c.get("tool_id")
+                        or c.get("biotools_id")
+                        or c.get("biotoolsID")
+                        or c.get("identifier")
+                        or ""
+                    )
+                    title = (
+                        c.get("title")
+                        or c.get("name")
+                        or c.get("tool_title")
+                        or c.get("display_title")
+                        or ""
+                    )
+                    try:
+                        scores = scorer.score_candidate(c)
+                    except Exception as exc:
+                        score_fallbacks["llm"] += 1
+                        logger.warning(
+                            "LLM scoring failed for '%s': %s. Using heuristic backup; rerun with --offline or check Ollama service.",
+                            title or candidate_id or "<unknown>",
+                            exc,
+                        )
+                        set_status(3, "SCORE – temporary LLM failure, heuristics applied")
+                        return heuristic_score_one(c)
+                    include = include_candidate(
+                        scores,
+                        min_bio_score=min_bio_score,
+                        min_doc_score=min_doc_score,
+                        has_homepage=bool(homepage),
+                    )
+                    decision = {
+                        "id": str(candidate_id),
+                        "title": str(title),
+                        "homepage": homepage,
+                        "publication_ids": publication_ids,
+                        "scores": scores,
+                        "include": include,
+                    }
+                    return (decision, c, homepage, include)
+
+            score_start = perf_counter()
+            try:
+                if total_candidates:
+                    update_interval = max(1, total_candidates // 20)
+                    processed = 0
+                    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                        futures = [executor.submit(score_one, c) for c in candidates]
+                        for fut in as_completed(futures):
+                            decision, c, homepage, include = fut.result()
+                            processed += 1
+                            report_rows.append(decision)
+                            scores = decision.get("scores", {})
+                            if include:
+                                payload.append(to_entry(c, homepage))
+                                accepted_records.append((c, scores, homepage))
+                            update_progress(3, processed, total_candidates)
+                            if (
+                                processed % update_interval == 0
+                                or processed == total_candidates
+                            ):
+                                set_status(
+                                    3,
+                                    f"SCORE – processed {processed}/{total_candidates} candidates",
+                                )
+                else:
+                    processed = 0
+            finally:
+                score_duration = perf_counter() - score_start
+
+            accepted_count = len(accepted_records)
+            total_scored = len(candidates)
+            rejected_count = max(total_scored - accepted_count, 0)
+            logger.info(
+                "SUMMARY score=%d accepted=%d rejected=%d llm_fallbacks=%d llm_health_fail=%d duration=%.2fs",
+                total_scored,
+                accepted_count,
+                rejected_count,
+                score_fallbacks.get("llm", 0),
+                score_fallbacks.get("health", 0),
+                score_duration,
+            )
+            logger.info("TIMING score_elapsed_seconds=%.3f", score_duration)
+            set_status(
+                3,
+                f"SCORE – complete in {score_duration:.1f}s ({accepted_count} accepted, {rejected_count} rejected)",
+                clear_progress=True,
+            )
 
         logger.info(step_msg(5, "OUTPUT – Write reports and bio.tools payload"))
         set_status(4, "OUTPUT – writing reports")

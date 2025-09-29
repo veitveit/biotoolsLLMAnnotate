@@ -21,22 +21,21 @@ pub2tools:
   idf: https://github.com/edamontology/edamontology/edammap/raw/master/doc/biotools.idf
   idf_stemmed: https://github.com/edamontology/edamontology/edammap/raw/master/doc/biotools.stemmed.idf
   p2t_month: null
-  from_date: '2024-01-01'
-  to_date: null
   selenium_firefox: null
   firefox_path: null
   p2t_cli: /custom/path/to/pub2tools
   output_dir: out/pub2tools
 pipeline:
-  min_score: 0.6
+  min_bio_score: 0.6
+  min_documentation_score: 0.6
   limit: null
   dry_run: false
-  output: out/exports/biotools_payload.json
-  report: out/reports/assessment.jsonl
-  model: llama3.2
-  concurrency: 8
   input_path: null
   offline: false
+  from_date: '2024-01-01'
+  to_date: null
+  resume_from_enriched: false
+  resume_from_pub2tools: false
 enrichment:
   europe_pmc:
     enabled: true
@@ -46,6 +45,8 @@ enrichment:
     timeout: 15
 ollama:
   host: http://localhost:11434
+  model: llama3.2
+  concurrency: 8
 logging:
   level: INFO
   file: null
@@ -82,9 +83,6 @@ scoring_prompt_template: 'Please evaluate this bioinformatics tool candidate for
         encoding="utf-8",
     )
 
-    out_payload = tmp_path / "payload.json"
-    out_report = tmp_path / "report.jsonl"
-
     env = os.environ.copy()
     repo_root = Path(__file__).resolve().parents[2]
     env["PYTHONPATH"] = str(repo_root / "src")
@@ -101,19 +99,23 @@ scoring_prompt_template: 'Please evaluate this bioinformatics tool candidate for
             "--from-date",
             "7d",
             "--offline",  # Use offline mode to avoid LLM JSON parsing issues
-            "--output",
-            str(out_payload),
-            "--report",
-            str(out_report),
         ],
         env=env,
         capture_output=True,
         text=True,
+        cwd=str(tmp_path),
     )
 
     # The test should pass if the CLI runs without error
     # We can't easily verify the p2t_cli value was used without modifying the code
     # to log it, but we can verify the config file is being read
     assert proc.returncode == 0
-    assert out_payload.exists()
-    assert out_report.exists()
+    out_dir = tmp_path / "out"
+    assert out_dir.exists()
+    time_period_dirs = list(out_dir.glob("range_*"))
+    assert len(time_period_dirs) == 1
+    run_dir = time_period_dirs[0]
+    assert (run_dir / "exports" / "biotools_payload.json").exists()
+    assert (run_dir / "exports" / "biotools_entries.json").exists()
+    assert (run_dir / "reports" / "assessment.jsonl").exists()
+    assert (run_dir / "cache" / "enriched_candidates.json.gz").exists()

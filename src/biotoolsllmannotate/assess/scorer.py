@@ -160,19 +160,19 @@ class Scorer:
     def __init__(self, model=None, config=None):
         self.config = config or get_config_yaml()
         self.client = OllamaClient(config=self.config)
-        self.model = model or self.config.get("pipeline", {}).get("model")
+        self.model = model or self.config.get("ollama", {}).get("model")
 
     def score_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """Score a candidate using LLM with proper error handling."""
         if not isinstance(candidate, dict):
             raise ValueError("Candidate must be a dictionary")
-        
+
         if not candidate.get("title") and not candidate.get("name"):
             raise ValueError("Candidate must have either 'title' or 'name' field")
-            
+
         prompt = self._build_prompt(candidate)
         origin_types = self._origin_types(candidate)
-        
+
         try:
             response = self.client.generate(prompt, model=self.model)
         except OllamaConnectionError as e:
@@ -287,7 +287,9 @@ Output: respond ONLY with a single JSON object shaped as:
         documentation_list = []
         if isinstance(documentation_value, str):
             documentation_list = [documentation_value]
-        elif isinstance(documentation_value, Sequence) and not isinstance(documentation_value, str):
+        elif isinstance(documentation_value, Sequence) and not isinstance(
+            documentation_value, str
+        ):
             for item in documentation_value:
                 if isinstance(item, dict) and item.get("url"):
                     documentation_list.append(str(item["url"]))
@@ -306,10 +308,13 @@ Output: respond ONLY with a single JSON object shaped as:
         doc_keywords_value = candidate.get("documentation_keywords")
         if isinstance(doc_keywords_value, str):
             documentation_keywords = doc_keywords_value.strip() or "None"
-        elif isinstance(doc_keywords_value, Sequence) and not isinstance(doc_keywords_value, str):
-            documentation_keywords = ", ".join(
-                str(v) for v in doc_keywords_value if str(v).strip()
-            ) or "None"
+        elif isinstance(doc_keywords_value, Sequence) and not isinstance(
+            doc_keywords_value, str
+        ):
+            documentation_keywords = (
+                ", ".join(str(v) for v in doc_keywords_value if str(v).strip())
+                or "None"
+            )
         else:
             documentation_keywords = "None"
 

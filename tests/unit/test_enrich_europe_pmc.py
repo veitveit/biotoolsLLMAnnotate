@@ -63,6 +63,52 @@ def test_enrich_adds_abstract(monkeypatch):
     reset_europe_pmc_cache()
 
 
+def test_enrich_uses_publication_ids_fallback(monkeypatch):
+    search_payload = {
+        "resultList": {
+            "result": [
+                {
+                    "title": "Sample Publication",
+                    "abstractText": "Fallback abstract text.",
+                    "pmid": "36631407",
+                }
+            ]
+        }
+    }
+
+    responses = iter([DummyResponse(json_data=search_payload)])
+
+    def fake_get(url, params=None, timeout=None):
+        return next(responses)
+
+    monkeypatch.setattr("biotoolsllmannotate.enrich.europe_pmc.requests.get", fake_get)
+
+    candidates = [
+        {
+            "title": "AFPMFL",
+            "publication_ids": ["PMID:36631407", "DOI:10.1093/BIB/BBAC606"],
+        }
+    ]
+
+    config = {
+        "enabled": True,
+        "include_full_text": False,
+        "timeout": 10,
+        "max_publications": 1,
+    }
+
+    enrich_candidates_with_europe_pmc(
+        candidates,
+        config=config,
+        logger=None,
+        offline=False,
+    )
+
+    assert candidates[0]["publication_abstract"] == "Fallback abstract text."
+    assert "pmid:36631407" in [pid.lower() for pid in candidates[0]["publication_ids"]]
+    reset_europe_pmc_cache()
+
+
 def test_enrich_adds_full_text_when_available(monkeypatch):
     search_payload = {
         "resultList": {

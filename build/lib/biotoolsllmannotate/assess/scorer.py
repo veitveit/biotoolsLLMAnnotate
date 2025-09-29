@@ -6,6 +6,19 @@ from .ollama_client import OllamaClient, OllamaConnectionError
 from biotoolsllmannotate.config import get_config_yaml
 
 
+def _safe_fill_template(template: str, fields: Mapping[str, Any]) -> str:
+    """Replace known placeholders without interpreting other braces.
+
+    This avoids KeyErrors when custom templates contain literal braces like
+    "{0, 0.5, 1}" while still supporting the `{placeholder}` fields we expose.
+    """
+
+    result = template
+    for key, value in fields.items():
+        result = result.replace(f"{{{key}}}", str(value))
+    return result
+
+
 def clamp_score(score: float) -> float:
     """Clamp score to [0, 1]."""
     return max(0.0, min(1.0, score))
@@ -147,19 +160,19 @@ class Scorer:
     def __init__(self, model=None, config=None):
         self.config = config or get_config_yaml()
         self.client = OllamaClient(config=self.config)
-        self.model = model or self.config.get("pipeline", {}).get("model")
+        self.model = model or self.config.get("ollama", {}).get("model")
 
     def score_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """Score a candidate using LLM with proper error handling."""
         if not isinstance(candidate, dict):
             raise ValueError("Candidate must be a dictionary")
-        
+
         if not candidate.get("title") and not candidate.get("name"):
             raise ValueError("Candidate must have either 'title' or 'name' field")
-            
+
         prompt = self._build_prompt(candidate)
         origin_types = self._origin_types(candidate)
-        
+
         try:
             response = self.client.generate(prompt, model=self.model)
         except OllamaConnectionError as e:
@@ -252,7 +265,10 @@ Selection/normalization rules:
 Base every decision on the supplied material only.
 Normalize publication identifiers to prefixes: DOI:..., PMID:..., PMCID:... and remove duplicates (case-insensitive).
 For any subcriterion scored 0 due to missing evidence, mention "insufficient evidence: <item>" in the rationale.
-Record each bio subcriterion as numbers {{0,0.5,1}} in bio_subscores and each documentation subcriterion as numbers {{0,0.5,1}} in documentation_subscores.
+Record each bio subcriterion as numbers {{0,0.5,1}} in `bio_subscores` and each documentation subcriterion as numbers {{0,0.5,1}} in `documentation_subscores`.
+Do NOT compute aggregate scores; only fill the provided fields.
+Do not output any value outside [0.0, 1.0].
+Always emit every field in the output JSON exactly once.
 Emit ONLY the fields in the schema below. Use "" for unknown strings and [] if no publication identifiers are found. Do not output booleans/strings instead of numbers.
 
 Output: respond ONLY with a single JSON object shaped as:
@@ -271,7 +287,9 @@ Output: respond ONLY with a single JSON object shaped as:
         documentation_list = []
         if isinstance(documentation_value, str):
             documentation_list = [documentation_value]
-        elif isinstance(documentation_value, Sequence) and not isinstance(documentation_value, str):
+        elif isinstance(documentation_value, Sequence) and not isinstance(
+            documentation_value, str
+        ):
             for item in documentation_value:
                 if isinstance(item, dict) and item.get("url"):
                     documentation_list.append(str(item["url"]))
@@ -290,30 +308,36 @@ Output: respond ONLY with a single JSON object shaped as:
         doc_keywords_value = candidate.get("documentation_keywords")
         if isinstance(doc_keywords_value, str):
             documentation_keywords = doc_keywords_value.strip() or "None"
-        elif isinstance(doc_keywords_value, Sequence) and not isinstance(doc_keywords_value, str):
-            documentation_keywords = ", ".join(
-                str(v) for v in doc_keywords_value if str(v).strip()
-            ) or "None"
+        elif isinstance(doc_keywords_value, Sequence) and not isinstance(
+            doc_keywords_value, str
+        ):
+            documentation_keywords = (
+                ", ".join(str(v) for v in doc_keywords_value if str(v).strip())
+                or "None"
+            )
         else:
             documentation_keywords = "None"
 
-        prompt = template.format(
-            title=candidate.get("title", ""),
-            description=candidate.get("description", ""),
-            homepage=candidate.get("homepage", ""),
-            documentation=", ".join(documentation_list),
-            repository=candidate.get("repository", ""),
-            tags=tags_str,
-            published_at=candidate.get("published_at", ""),
-            publication_abstract=candidate.get("publication_abstract", ""),
-            publication_full_text=candidate.get(
-                "publication_full_text",
-                candidate.get("publication_full_text_url", ""),
-            ),
-            publication_ids=", ".join(publication_ids),
-            homepage_status=homepage_status or "",
-            homepage_error=homepage_error or "",
-            documentation_keywords=documentation_keywords,
+        prompt = _safe_fill_template(
+            template,
+            {
+                "title": candidate.get("title", ""),
+                "description": candidate.get("description", ""),
+                "homepage": candidate.get("homepage", ""),
+                "documentation": ", ".join(documentation_list),
+                "repository": candidate.get("repository", ""),
+                "tags": tags_str,
+                "published_at": candidate.get("published_at", ""),
+                "publication_abstract": candidate.get("publication_abstract", ""),
+                "publication_full_text": candidate.get(
+                    "publication_full_text",
+                    candidate.get("publication_full_text_url", ""),
+                ),
+                "publication_ids": ", ".join(publication_ids),
+                "homepage_status": homepage_status or "",
+                "homepage_error": homepage_error or "",
+                "documentation_keywords": documentation_keywords,
+            },
         )
         return prompt
 

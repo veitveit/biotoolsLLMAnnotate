@@ -115,3 +115,60 @@ def test_scrape_homepage_removes_absent_keywords():
     )
 
     assert candidate.get("documentation_keywords") is None
+
+
+def test_scrape_homepage_follows_frames():
+    from biotoolsllmannotate.enrich.scraper import scrape_homepage_metadata
+
+    class DummyResponse:
+        def __init__(self, text):
+            self.status_code = 200
+            self.text = text
+
+    class DummySession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, timeout, headers):
+            self.calls.append(url)
+            if url == "https://example.org/tool":
+                return DummyResponse(
+                    """
+                    <html>
+                      <frameset>
+                        <frame src="/embedded/docs" />
+                      </frameset>
+                    </html>
+                    """
+                )
+            elif url == "https://example.org/embedded/docs":
+                return DummyResponse(
+                    """
+                    <html><body>
+                      <a href="/manual">Installation and Usage guide</a>
+                    </body></html>
+                    """
+                )
+            raise AssertionError(f"Unexpected URL requested: {url}")
+
+    class DummyLogger:
+        def warning(self, *args, **kwargs):
+            raise AssertionError(f"Unexpected warning: {args}")
+
+    candidate = {
+        "homepage": "https://example.org/tool",
+    }
+
+    scrape_homepage_metadata(
+        candidate,
+        config={"max_frames": 2},
+        logger=DummyLogger(),
+        session=DummySession(),
+    )
+
+    assert candidate.get("homepage_scraped") is True
+    keywords = candidate.get("documentation_keywords") or []
+    assert "installation" in keywords
+    assert "usage" in keywords or "usage guide" in keywords
+    docs = {d.get("url") for d in candidate.get("documentation", [])}
+    assert "https://example.org/manual" in docs

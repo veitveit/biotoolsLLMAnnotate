@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable
+from itertools import islice
 from typing import Any
 
 import requests
@@ -9,7 +10,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
 DEFAULT_USER_AGENT = (
-    "biotoolsllmannotate/0.8.2 (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"
+    "biotoolsllmannotate/0.9.1 (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"
 )
 
 DOCUMENTATION_KEYWORDS: tuple[str, ...] = (
@@ -154,6 +155,25 @@ def fetch_with_timeout(url: str, timeout: float = 1.0):
     raise TimeoutError(f"Timeout fetching {url}")
 
 
+def _merge_metadata(into: dict[str, Any], addition: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(into)
+    docs = set(into.get("documentation", []) or [])
+    docs.update(addition.get("documentation", []) or [])
+    if docs:
+        merged["documentation"] = sorted(docs)
+
+    keywords = set(into.get("documentation_keywords", []) or [])
+    keywords.update(addition.get("documentation_keywords", []) or [])
+    if keywords:
+        merged["documentation_keywords"] = sorted(keywords)
+    elif "documentation_keywords" in merged and not keywords:
+        merged.pop("documentation_keywords", None)
+
+    if not merged.get("repository") and addition.get("repository"):
+        merged["repository"] = addition["repository"]
+    return merged
+
+
 def extract_metadata(html_content: str, base_url: str) -> dict[str, Any]:
     """Extract documentation and repository links from HTML content."""
 
@@ -183,6 +203,19 @@ def extract_metadata(html_content: str, base_url: str) -> dict[str, Any]:
     if repository:
         meta["repository"] = repository
     return meta
+
+
+def _discover_frame_urls(html_content: str, base_url: str) -> list[str]:
+    soup = BeautifulSoup(html_content, "html.parser")
+    frame_urls: list[str] = []
+    for tag_name in ("frame", "iframe"):
+        for tag in soup.find_all(tag_name):
+            src = tag.get("src")
+            if not src:
+                continue
+            resolved = urljoin(base_url, src)
+            frame_urls.append(resolved)
+    return frame_urls
 
 
 def _normalize_doc_urls(value: Any) -> list[str]:
@@ -239,9 +272,8 @@ def scrape_homepage_metadata(
     config: dict[str, Any] | None,
     logger,
     session: requests.Session | None = None,
-) -> None:
+    ) -> None:
     """Fetch homepage HTML and enrich candidate with documentation/repository links."""
-
     cfg = config or {}
     homepage = candidate.get("homepage")
     if not isinstance(homepage, str) or not homepage.strip():
@@ -276,6 +308,22 @@ def scrape_homepage_metadata(
         return
 
     meta = extract_metadata(html, homepage)
+
+    frame_urls = _discover_frame_urls(html, homepage)
+    max_frames = int(cfg.get("max_frames", 3))
+    for frame_url in islice((u for u in frame_urls if u), max_frames):
+        try:
+            frame_response = sess.get(frame_url, timeout=timeout, headers=headers)
+            if frame_response.status_code >= 400:
+                logger.warning(
+                    "SCRAPE frame %s failed with HTTP %s", frame_url, frame_response.status_code
+                )
+                continue
+            frame_meta = extract_metadata(frame_response.text, frame_url)
+            if frame_meta:
+                meta = _merge_metadata(meta, frame_meta)
+        except Exception as exc:  # pragma: no cover - network specific
+            logger.warning("SCRAPE frame fetch failed for %s: %s", frame_url, exc)
     docs = meta.get("documentation", [])
     if docs:
         _merge_documentation(candidate, docs)

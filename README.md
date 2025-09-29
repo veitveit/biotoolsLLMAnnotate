@@ -55,7 +55,10 @@ export PUB2TOOLS_CLI="/path/to/pub2tools"
 ```yaml
 pub2tools:
   p2t_cli: "/path/to/pub2tools"
-  to_biotools_file: "/path/to/pub2tools_export.json"  # optional, any filename
+
+pipeline:
+  resume_from_pub2tools: true  # optional, reuse cached to_biotools.json exports
+  resume_from_scoring: true    # optional, reuse cached assessment results for new thresholds
 ```
 
 **Supported Formats:**
@@ -63,7 +66,7 @@ pub2tools:
 - **Java .jar:** `java -jar /path/to/pub2tools-1.1.1.jar`
 - **Custom command:** Any command string that launches Pub2Tools
 
-If not configured, the pipeline will look for `pub2tools` in your PATH or in `tools/pub2tools/pub2tools`.
+If not configured, the pipeline will look for `pub2tools` in your PATH or in `tools/pub2tools/pub2tools`. When `pipeline.resume_from_pub2tools` (or `--resume-from-pub2tools`) is enabled, the CLI will automatically reuse the most recent `to_biotools.json` saved under `out/<period>/pub2tools/` instead of invoking Pub2Tools again.
 
 ### Troubleshooting Pub2Tools Setup
 
@@ -139,10 +142,10 @@ python -m biotoolsllmannotate --offline --dry-run
 ## Example Usage
 ```bash
 # Fetch recent candidates and assess them
-python -m biotoolsllmannotate --from-date 7d --min-score 0.6 --output out/exports/biotools_payload.json --report out/reports/assessment.jsonl
+python -m biotoolsllmannotate --from-date 7d --min-score 0.6
 
 # Test with sample data
-python -m biotoolsllmannotate --input tests/fixtures/pub2tools/sample.json --dry-run --report out/reports/assessment.jsonl
+python -m biotoolsllmannotate --input tests/fixtures/pub2tools/sample.json --dry-run
 
 # Reuse an existing Pub2Tools export (no rename needed)
 python -m biotoolsllmannotate --input /path/to/pub2tools_export.json --dry-run
@@ -159,12 +162,13 @@ python -m biotoolsllmannotate --from-date 2023-01-01 --to-date 2023-12-31 --min-
 ```
 
 ## Output Files
-- `out/exports/biotools_payload.json`: biotoolsSchema-compliant JSON bundle for upload
-- `out/reports/assessment.jsonl`: Per-candidate report with bio/documentation scores, rationale, and evidence
-- `out/reports/assessment.csv`: Spreadsheet-friendly version of the report (`tool_name`, `homepage`, publication IDs, `bio_score`, `documentation_score`, `concise_description`, rationale, origins)
-- `out/exports/biotools_entries.json`: Full biotoolsSchema payload for accepted tools, ready for upload/merge
-- `out/cache/enriched_candidates.json.gz`: Optional cache of enriched candidates (enable with `--enriched-cache`, resume with `--resume-from-enriched`)
-- `out/logs/ollama.log`: Append-only trace of every LLM scoring exchange (created on first LLM call)
+- `out/<time-period>/exports/biotools_payload.json`: biotoolsSchema-compliant JSON bundle for upload
+- `out/<time-period>/exports/biotools_entries.json`: Full biotoolsSchema payload for accepted tools, ready for upload/merge
+- `out/<time-period>/reports/assessment.jsonl`: Per-candidate report with bio/documentation scores, rationale, and evidence; reused when `--resume-from-scoring` is enabled so thresholds can be adjusted without rerunning LLM scoring
+- `out/<time-period>/reports/assessment.csv`: Spreadsheet-friendly version of the report (`tool_name`, `homepage`, publication IDs, `bio_score`, `documentation_score`, `concise_description`, rationale, origins)
+- `out/<time-period>/cache/enriched_candidates.json.gz`: Cache of enriched candidates automatically written and reused when `--resume-from-enriched` is set
+- `out/<time-period>/logs/ollama.log`: Append-only trace of every LLM scoring exchange (created on first LLM call)
+- `out/<time-period>/<original-config>.yaml`: Copy of the configuration used for the run (or `config.generated.yaml` when loaded from defaults)
 - `out/pub2tools/run_<timestamp>/`: Raw artifacts fetched from Pub2Tools when the CLI wrapper runs
 
 ## LLM Scoring
@@ -190,6 +194,11 @@ python -m biotoolsllmannotate --from-date 2023-01-01 --to-date 2023-12-31 --min-
 - The post-processing step writes `out/exports/biotools_entries.json`, combining the enriched metadata with the latest LLM inferences.
 - Toggle `enrichment.europe_pmc.include_full_text` if you want the prompt to include the open-access body of the article (truncated to `max_full_text_chars`).
 - The enrichment step is skipped automatically in `--offline` mode or when no publication identifiers are present.
+
+### Scoring Resume
+- Use `--resume-from-scoring` (or set `pipeline.resume_from_scoring: true`) to reuse the cached `assessment.jsonl` from the time-period directory without invoking the LLM again.
+- The pipeline reloads the enriched candidates cache and reapplies the current thresholds to every cached decision, regenerating `biotools_payload.json` and `biotools_entries.json` with the updated include flags.
+- Pair this flag with `--resume-from-enriched` (or an existing cache) to ensure enriched candidate metadata is available; otherwise the pipeline will fall back to rerunning scoring.
 
 ## Logging & Health Checks
 - Step logs now carry consistent action tags (`GATHER`, `DEDUP`, `ENRICH`, `SCRAPE`, `SCORE`, `OUTPUT`, `SUMMARY`) so you can skim runs quickly.

@@ -6,7 +6,7 @@ from pathlib import Path
 from .. import __version__
 
 app = typer.Typer(
-    help="CLI to fetch Pub2Tools candidates, enrich, score, and emit bio.tools annotations with a live Rich scoreboard.\n\nExamples:\n  python -m biotoolsllmannotate --from-date 2024-01-01 --to-date 2024-01-31 --min-score 0.6 --output out/exports/biotools_payload.json --report out/reports/assessment.jsonl\n  python -m biotoolsllmannotate --input tests/fixtures/pub2tools/sample.json --dry-run --report out/reports/assessment.jsonl\n  python -m biotoolsllmannotate --write-default-config  # scaffold config.yaml with presets\n  python -m biotoolsllmannotate --offline --quiet\n\nTip: Point pipeline.input_path or pub2tools.to_biotools_file at any Pub2Tools export JSON to skip invoking the CLI when iterating on scoring.",
+    help="CLI to fetch Pub2Tools candidates, enrich, score, and emit bio.tools annotations with a live Rich scoreboard.\n\nExamples:\n  python -m biotoolsllmannotate --from-date 2024-01-01 --to-date 2024-01-31 --min-score 0.6\n  python -m biotoolsllmannotate --input tests/fixtures/pub2tools/sample.json --dry-run\n  python -m biotoolsllmannotate --write-default-config  # scaffold config.yaml with presets\n  python -m biotoolsllmannotate --offline --quiet\n\nTip: Use --resume-from-pub2tools (or set pipeline.resume_from_pub2tools: true) to reuse the latest Pub2Tools export without rerunning the CLI.",
     add_completion=False,
 )
 
@@ -68,12 +68,26 @@ def _run_impl(
         "--to-date",
         help="End date for Pub2Tools fetching (YYYY-MM-DD).",
     ),
-    min_score: float = typer.Option(
-        0.6,
+    min_score: float | None = typer.Option(
+        None,
         "--min-score",
         min=0.0,
         max=1.0,
-        help="Minimum LS and relevance score for inclusion.",
+        help="Legacy combined threshold applied to both bio and documentation scores when separate thresholds are not provided.",
+    ),
+    min_bio_score: float | None = typer.Option(
+        None,
+        "--min-bio-score",
+        min=0.0,
+        max=1.0,
+        help="Minimum bio score required for inclusion (overrides pipeline.min_bio_score).",
+    ),
+    min_doc_score: float | None = typer.Option(
+        None,
+        "--min-doc-score",
+        min=0.0,
+        max=1.0,
+        help="Minimum documentation score required for inclusion (overrides pipeline.min_documentation_score).",
     ),
     limit: int | None = typer.Option(
         None, "--limit", help="Max candidates to process."
@@ -81,30 +95,20 @@ def _run_impl(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Assess and report only; do not write payload."
     ),
-    output: Path = typer.Option(
-        Path("out/exports/biotools_payload.json"),
-        "--output",
-        help="Output path for biotoolsSchema payload JSON.",
-    ),
-    report: Path = typer.Option(
-        Path("out/reports/assessment.jsonl"),
-        "--report",
-        help="Output path for per-candidate JSONL report.",
-    ),
-    updated_entries: Path = typer.Option(
-        Path("out/exports/biotools_entries.json"),
-        "--updated-entries",
-        help="Output path for full bio.tools entries JSON payload.",
-    ),
-    enriched_cache: Path | None = typer.Option(
-        None,
-        "--enriched-cache",
-        help="Path to write/read enriched candidates (.json.gz).",
+    resume_from_pub2tools: bool = typer.Option(
+        False,
+        "--resume-from-pub2tools",
+        help="Resume after the Pub2Tools export step by reusing the most recent cached to_biotools.json for the time-period folder.",
     ),
     resume_from_enriched: bool = typer.Option(
         False,
         "--resume-from-enriched",
         help="Resume pipeline starting from an enriched candidates cache.",
+    ),
+    resume_from_scoring: bool = typer.Option(
+        False,
+        "--resume-from-scoring",
+        help="Resume pipeline after scoring by reusing the cached assessment report and enriched candidates.",
     ),
     model: str | None = typer.Option(
         None, "--model", help="Ollama model name (default from config)."
@@ -142,8 +146,8 @@ def _run_impl(
     """Run the annotation pipeline.
 
     Examples:
-        biotools-annotate run --from-date 2024-01-01 --to-date 2024-01-31 --min-score 0.6 --output out/exports/biotools_payload.json --report out/reports/assessment.jsonl
-        biotools-annotate run --input tests/fixtures/pub2tools/sample.json --dry-run --report out/reports/assessment.jsonl
+        biotools-annotate run --from-date 2024-01-01 --to-date 2024-01-31 --min-score 0.6
+        biotools-annotate run --input tests/fixtures/pub2tools/sample.json --dry-run
         biotools-annotate run --write-default-config
         biotools-annotate run --offline --quiet
 
@@ -155,39 +159,40 @@ def _run_impl(
     """
     from .run import execute_run
     import sys
-    from ..config import get_config_yaml
+    from ..config import get_config_yaml, get_default_config_path
 
     # Load config first
-    config = get_config_yaml(str(config_path) if config_path else None)
+    config_path_value = Path(config_path) if config_path else None
+    config = get_config_yaml(str(config_path_value) if config_path_value else None)
+    if config_path_value is not None:
+        config_source_path = config_path_value
+    else:
+        config_source_path = Path(get_default_config_path())
     pub2tools_cfg = config.get("pub2tools", {}) or {}
     pipeline_cfg = config.get("pipeline", {}) or {}
+    ollama_cfg = config.get("ollama", {}) or {}
 
     # Check required parameters
 
     # Use config defaults for optional parameters that weren't explicitly set
     # Note: CLI args take precedence over config values
     if from_date is None:
-        from_date = pub2tools_cfg.get("from_date")
+        from_date = pipeline_cfg.get("from_date")
     if to_date is None:
-        to_date = pub2tools_cfg.get("to_date")
+        to_date = pipeline_cfg.get("to_date")
     if model is None:
-        model = pipeline_cfg.get("model")
-    if output == Path("out/exports/biotools_payload.json"):
-        config_output = pipeline_cfg.get("output")
-        if config_output:
-            output = Path(config_output)
-    if report == Path("out/reports/assessment.jsonl"):
-        config_report = pipeline_cfg.get("report")
-        if config_report:
-            report = Path(config_report)
-    if updated_entries == Path("out/exports/biotools_entries.json"):
-        config_updated = pipeline_cfg.get("updated_entries")
-        if config_updated:
-            updated_entries = Path(config_updated)
-    if enriched_cache is None:
-        config_cache = pipeline_cfg.get("enriched_cache")
-        if config_cache:
-            enriched_cache = Path(config_cache)
+        model = ollama_cfg.get("model")
+    if not resume_from_pub2tools:
+        config_resume_pub2tools = pipeline_cfg.get("resume_from_pub2tools")
+        if isinstance(config_resume_pub2tools, bool):
+            resume_from_pub2tools = config_resume_pub2tools
+        elif isinstance(config_resume_pub2tools, str):
+            resume_from_pub2tools = config_resume_pub2tools.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
     if not resume_from_enriched:
         config_resume = pipeline_cfg.get("resume_from_enriched")
         if isinstance(config_resume, bool):
@@ -199,18 +204,58 @@ def _run_impl(
                 "yes",
                 "on",
             }
+    if not resume_from_scoring:
+        config_resume_scoring = pipeline_cfg.get("resume_from_scoring")
+        if isinstance(config_resume_scoring, bool):
+            resume_from_scoring = config_resume_scoring
+        elif isinstance(config_resume_scoring, str):
+            resume_from_scoring = config_resume_scoring.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
     if concurrency == 8:
-        config_concurrency = pipeline_cfg.get("concurrency")
+        config_concurrency = ollama_cfg.get("concurrency")
         if config_concurrency is not None:
             concurrency = config_concurrency
     if input_path is None:
         config_input = pipeline_cfg.get("input_path")
         if config_input:
             input_path = config_input
-    if input_path is None:
-        config_to_biotools = pub2tools_cfg.get("to_biotools_file")
-        if config_to_biotools:
-            input_path = config_to_biotools
+
+    if resume_from_pub2tools and input_path:
+        typer.echo(
+            "--resume-from-pub2tools cannot be used together with --input or pipeline.input_path",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # Determine score thresholds (CLI > legacy min-score > config > default)
+    def _coerce_threshold(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    config_min_bio = pipeline_cfg.get("min_bio_score")
+    config_min_doc = pipeline_cfg.get("min_documentation_score")
+
+    if min_score is not None:
+        if min_bio_score is None:
+            min_bio_score = min_score
+        if min_doc_score is None:
+            min_doc_score = min_score
+
+    if min_bio_score is None:
+        min_bio_score = _coerce_threshold(config_min_bio, 0.6)
+    else:
+        min_bio_score = _coerce_threshold(min_bio_score, 0.6)
+
+    if min_doc_score is None:
+        min_doc_score = _coerce_threshold(config_min_doc, 0.6)
+    else:
+        min_doc_score = _coerce_threshold(min_doc_score, 0.6)
 
     # Set logging level
     import logging
@@ -238,11 +283,10 @@ def _run_impl(
         execute_run(
             from_date=from_date,
             to_date=to_date,
-            min_score=min_score,
+            min_bio_score=min_bio_score,
+            min_doc_score=min_doc_score,
             limit=limit,
             dry_run=dry_run,
-            output=output,
-            report=report,
             model=model,
             concurrency=concurrency,
             input_path=input_path,
@@ -254,9 +298,10 @@ def _run_impl(
             p2t_cli=p2t_cli,
             show_progress=not quiet,
             config_data=config,
-            updated_entries=updated_entries,
-            enriched_cache=enriched_cache,
             resume_from_enriched=resume_from_enriched,
+            resume_from_pub2tools=resume_from_pub2tools,
+            resume_from_scoring=resume_from_scoring,
+            config_file_path=config_source_path,
         )
     except Exception as e:
         import traceback

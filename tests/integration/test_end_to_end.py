@@ -11,9 +11,6 @@ def test_end_to_end_on_fixture(tmp_path):
     fixture = repo_root / "tests" / "fixtures" / "pub2tools" / "sample.json"
     assert fixture.exists(), "Missing test fixture"
 
-    payload = tmp_path / "payload.json"
-    report = tmp_path / "report.jsonl"
-
     env = os.environ.copy()
     env["BIOTOOLS_ANNOTATE_INPUT"] = str(fixture)
     env["PYTHONPATH"] = str(repo_root / "src")
@@ -25,10 +22,6 @@ def test_end_to_end_on_fixture(tmp_path):
             "biotoolsllmannotate",
             "--from-date",
             "7d",
-            "--output",
-            str(payload),
-            "--report",
-            str(report),
             "--input",
             str(fixture),
             "--offline",
@@ -36,9 +29,15 @@ def test_end_to_end_on_fixture(tmp_path):
         env=env,
         capture_output=True,
         text=True,
+        cwd=str(tmp_path),
     )
 
     assert proc.returncode == 0
+    out_dir = tmp_path / "out"
+    time_period_dirs = list(out_dir.glob("range_*"))
+    assert len(time_period_dirs) == 1
+    run_dir = time_period_dirs[0]
+    payload = run_dir / "exports" / "biotools_payload.json"
     data = json.loads(payload.read_text(encoding="utf-8"))
     assert isinstance(data, list)
     for obj in data:

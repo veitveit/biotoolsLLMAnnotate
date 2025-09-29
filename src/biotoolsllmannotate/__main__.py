@@ -20,19 +20,11 @@ def _fallback_main() -> None:
 
     p_run.add_argument("--from-date")
     p_run.add_argument("--to-date")
-    p_run.add_argument("--min-score", type=float, default=0.6)
+    p_run.add_argument("--min-score", type=float)
+    p_run.add_argument("--min-bio-score", type=float)
+    p_run.add_argument("--min-doc-score", type=float)
     p_run.add_argument("--limit", type=int)
     p_run.add_argument("--dry-run", action="store_true")
-    p_run.add_argument(
-        "--output",
-        type=Path,
-        default=Path("out/exports/biotools_payload.json"),
-    )
-    p_run.add_argument(
-        "--report",
-        type=Path,
-        default=Path("out/reports/assessment.jsonl"),
-    )
     p_run.add_argument("--model", default="llama3.2")
     p_run.add_argument("--concurrency", type=int, default=8)
 
@@ -42,14 +34,24 @@ def _fallback_main() -> None:
         return
     if args.command == "run":
         from_date = args.from_date or "7d"
+        min_bio_score = args.min_bio_score
+        min_doc_score = args.min_doc_score
+        if args.min_score is not None:
+            if min_bio_score is None:
+                min_bio_score = args.min_score
+            if min_doc_score is None:
+                min_doc_score = args.min_score
+        if min_bio_score is None:
+            min_bio_score = 0.6
+        if min_doc_score is None:
+            min_doc_score = 0.6
         execute_run(
             from_date=from_date,
             to_date=args.to_date,
-            min_score=args.min_score,
+            min_bio_score=min_bio_score,
+            min_doc_score=min_doc_score,
             limit=args.limit,
             dry_run=args.dry_run,
-            output=args.output,
-            report=args.report,
             model=args.model,
             concurrency=args.concurrency,
         )

@@ -12,6 +12,7 @@ from biotoolsllmannotate.config import get_config_yaml
 
 class OllamaConnectionError(Exception):
     """Raised when Ollama service is unavailable."""
+
     pass
 
 
@@ -20,32 +21,57 @@ class OllamaClient:
 
     def __init__(self, base_url=None, config=None):
         self.config = config or get_config_yaml()
-        self.base_url = base_url or self.config.get("ollama", {}).get("host", "http://localhost:11434")
+        ollama_cfg = self.config.get("ollama", {}) or {}
+        self.base_url = base_url or ollama_cfg.get("host", "http://localhost:11434")
         log_path = self.config.get("logging", {}).get("llm_log")
         self.llm_log_path = Path(log_path) if log_path else Path("out/logs/ollama.log")
-        
+
+        raw_retries = ollama_cfg.get("max_retries", self.config.get("max_attempts", 3))
+        try:
+            parsed_retries = int(raw_retries)
+        except (TypeError, ValueError):
+            parsed_retries = 3
+        self.max_retries = max(0, parsed_retries)
+
+        raw_backoff = ollama_cfg.get(
+            "retry_backoff_seconds",
+            self.config.get("backoff_seconds", 2),
+        )
+        try:
+            self.retry_backoff_seconds = float(raw_backoff)
+        except (TypeError, ValueError):
+            self.retry_backoff_seconds = 2.0
+        if self.retry_backoff_seconds < 0:
+            self.retry_backoff_seconds = 0.0
+
         # Setup session with connection pooling and retries
         self.session = requests.Session()
         retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
+            total=self.max_retries,
+            backoff_factor=self.retry_backoff_seconds,
             status_forcelist=[429, 500, 502, 503, 504],
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy, pool_connections=10, pool_maxsize=20
+        )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
-        self.session.headers.update({'Connection': 'keep-alive'})
+        self.session.headers.update({"Connection": "keep-alive"})
 
-    def generate(self, prompt, model=None, temperature=0.05, top_p=1.0, seed=None):
+    def generate(self, prompt, model=None, temperature=0.075, top_p=1.0, seed=None):
         from tenacity import retry, stop_after_attempt, wait_fixed
 
-        max_attempts = self.config.get("max_attempts", 3)
-        backoff = self.config.get("backoff_seconds", 2)
+        max_attempts = max(1, 1 + self.max_retries)
+        backoff = self.retry_backoff_seconds
 
-        @retry(stop=stop_after_attempt(max_attempts), wait=wait_fixed(backoff))
+        @retry(
+            stop=stop_after_attempt(max_attempts),
+            wait=wait_fixed(backoff),
+            reraise=True,
+        )
         def _call():
             payload = {
-                "model": model or self.config.get("pipeline", {}).get("model"),
+                "model": model or self.config.get("ollama", {}).get("model"),
                 "prompt": prompt,
                 "temperature": temperature,
                 "top_p": top_p,
@@ -54,18 +80,22 @@ class OllamaClient:
                 payload["seed"] = seed
             try:
                 resp = self.session.post(
-                    f"{self.base_url}/api/generate", 
-                    json=payload, 
-                    timeout=self.config.get("ollama_timeout", 300)
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                    timeout=self.config.get("ollama_timeout", 300),
                 )
                 resp.raise_for_status()
             except requests.exceptions.HTTPError as e:
                 if resp.status_code == 404 and "not found" in resp.text:
                     model_name = payload.get("model", "unknown")
-                    raise OllamaConnectionError(f"Model '{model_name}' not found in Ollama. Available models: ollama list")
-                raise OllamaConnectionError(f"Ollama HTTP error: {e}")
+                    raise OllamaConnectionError(
+                        f"Model '{model_name}' not found in Ollama. Available models: ollama list"
+                    ) from e
+                raise OllamaConnectionError(f"Ollama HTTP error: {e}") from e
             except requests.exceptions.RequestException as e:
-                raise OllamaConnectionError(f"Failed to connect to Ollama at {self.base_url}: {e}")
+                raise OllamaConnectionError(
+                    f"Failed to connect to Ollama at {self.base_url}: {e}"
+                ) from e
             combined = ""
             for line in resp.text.strip().splitlines():
                 try:
@@ -107,9 +137,15 @@ class OllamaClient:
             resp.raise_for_status()
             return True, None
         except requests.exceptions.ConnectionError:
-            return False, f"Connection failed: Ollama service not available at {self.base_url}"
+            return (
+                False,
+                f"Connection failed: Ollama service not available at {self.base_url}",
+            )
         except requests.exceptions.Timeout:
-            return False, f"Timeout: Ollama service at {self.base_url} took too long to respond"
+            return (
+                False,
+                f"Timeout: Ollama service at {self.base_url} took too long to respond",
+            )
         except requests.exceptions.RequestException as exc:
             return False, f"Request failed: {exc}"
         except Exception as exc:

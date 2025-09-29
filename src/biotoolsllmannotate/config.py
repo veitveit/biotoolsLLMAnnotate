@@ -14,23 +14,24 @@ DEFAULT_CONFIG_YAML = {
         "timeout": 6000,
         "retryLimit": 0,
         "fetcher_threads": 4,
-        "to_biotools_file": None,
-        "from_date": "7d",
-        "to_date": None,
     },
     "pipeline": {
-        "output": "out/exports/biotools_payload.json",
-        "report": "out/reports/assessment.jsonl",
-        "model": "llama3.2",
-        "concurrency": 8,
         "input_path": None,
-        "updated_entries": "out/exports/biotools_entries.json",
-    "payload_version": "0.9.1",
-        "enriched_cache": "out/cache/enriched_candidates.json.gz",
+        "payload_version": "0.9.1",
         "resume_from_enriched": False,
+        "from_date": "7d",
+        "to_date": None,
+        "resume_from_pub2tools": False,
+        "resume_from_scoring": False,
+        "min_bio_score": 0.6,
+        "min_documentation_score": 0.6,
     },
     "ollama": {
         "host": "http://localhost:11434",
+        "model": "llama3.2",
+        "max_retries": 3,
+        "retry_backoff_seconds": 2,
+        "concurrency": 8,
     },
     "logging": {
         "level": "INFO",
@@ -68,6 +69,8 @@ Publication abstract: {publication_abstract}
 Publication full text: {publication_full_text}
 Known publication identifiers: {publication_ids}
 
+Note: The documentation keywords and found keywords listed above were automatically mined from the homepage, papers, and other reference material whose raw text is not included in this prompt. Treat them as secondary hints and cite them explicitly when used.
+
 Task:
 Score the resource using the rubric below. For every subcriterion assign exactly one of {{0, 0.5, 1}}. Base every decision only on the provided material. Do not invent facts or URLs. If the resource is not life-science software, set ALL bio subcriteria A1–A5 = 0 and explain why in the rationale.
 
@@ -88,6 +91,13 @@ B5 Onboarding & support (e.g. quickstart/tutorial, contact, faq).
 Selection/normalization rules:
 
 Base every decision on the supplied material only.
+Documentation links and keywords listed above are rubric-aligned evidence sources. Interpret them as:
+• Installation pathways (B2): presence of urls or keywords such as install, installation, package, pip, conda, workflow → award ≥0.5; reach 1.0 when both keyword and explicit link are provided.
+• Reproducibility aids (B3): release, version, tag, news, changelog in links/keywords → award ≥0.5; raise to 1.0 when multiple supporting signals exist.
+• Maintenance signal (B4): commit, issues, activity, support, community, workflow → award ≥0.5; raise to 1.0 if both keyword and corresponding link (e.g. commits page) are present.
+• Documentation completeness & onboarding (B1/B5): doc, docs, documentation, guide, manual, usage, faq, contact → award ≥0.5; raise to 1.0 when links confirm comprehensive material.
+Explicitly cite the supporting keyword or link as "keyword evidence" when scoring.
+Tags listed above are likewise extracted hints from the same external sources; cite them as "keyword evidence" when relevant but do not infer new facts beyond what is stated.
 Normalize publication identifiers to prefixes: DOI:..., PMID:..., PMCID:... and remove duplicates (case-insensitive).
 For any subcriterion scored 0 due to missing evidence, mention "insufficient evidence: <item>" in the rationale.
 Record each bio subcriterion as numbers {{0,0.5,1}} in `bio_subscores` and each documentation subcriterion as numbers {{0,0.5,1}} in `documentation_subscores`.
@@ -161,14 +171,15 @@ def get_config_yaml(config_path=None, validate=True):
     """
     config = load_yaml_config(config_path)
     final_config = config or DEFAULT_CONFIG_YAML.copy()
-    
+
     if validate:
         # Import here to avoid circular imports
         try:
             from .validation import validate_and_raise
+
             validate_and_raise(final_config)
         except ImportError:
             # Validation module not available, skip validation
             pass
-    
+
     return final_config

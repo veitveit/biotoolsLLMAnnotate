@@ -47,10 +47,10 @@ biotools-annotate --write-default-config
 - **CLI equivalent**: `--p2t-month`
 - **Example**: `"2024-09"`
 
-#### `pub2tools.from_date` / `pub2tools.to_date`
+#### `pipeline.from_date` / `pipeline.to_date`
 - **Type**: String (relative window like `7d` or ISO-8601) or null
 - **Default**: `"7d"` / `null`
-- **Description**: Date range for fetching candidates (alternative to `p2t_month`)
+- **Description**: Date range for fetching candidates (alternative to `p2t_month`), applied across the entire pipeline.
 - **CLI equivalent**: `--from-date`, `--to-date`
 - **Example**: `"2024-09-01"` or `"30d"`
 
@@ -86,37 +86,12 @@ biotools-annotate --write-default-config
 
 ### Pipeline Configuration
 
-#### `pipeline.output`
-- **Type**: String (path)
-- **Default**: `"out/exports/biotools_payload.json"`
-- **Description**: Output path for bio.tools payload JSON
-- **CLI equivalent**: `--output`
-- **Example**: `"results/payload.json"`
-
-#### `pipeline.report`
-- **Type**: String (path)
-- **Default**: `"out/reports/assessment.jsonl"`
-- **Description**: Output path for per-candidate JSONL report
-- **CLI equivalent**: `--report`
-- **Example**: `"results/report.jsonl"`
-
-#### `pipeline.updated_entries`
-- **Type**: String (path)
-- **Default**: `"out/exports/biotools_entries.json"`
-- **Description**: Output path for the full biotoolsSchema payload containing accepted, enriched tool entries.
-- **CLI equivalent**: `--updated-entries`
-- **Example**: `"results/updated_entries.json"`
-
-#### `pipeline.enriched_cache`
-- **Type**: String (path)
-- **Default**: `"out/cache/enriched_candidates.json.gz"`
-- **Description**: Path for the gzipped cache of enriched candidates (compatible with `--enriched-cache` / `--resume-from-enriched`).
-- **Example**: `"cache/enriched.json.gz"`
+> **Note:** All pipeline artifacts are written to a time-period folder (`out/<time-period>/…`) using fixed filenames. After each run the active configuration file (or a generated snapshot) is copied into that folder for record keeping.
 
 #### `pipeline.resume_from_enriched`
 - **Type**: Boolean
 - **Default**: `false`
-- **Description**: When `true`, skip ingestion/enrichment and start from the cache pointed to by `pipeline.enriched_cache` (same as passing `--resume-from-enriched`).
+- **Description**: When `true`, the pipeline skips ingestion/enrichment and looks for the default cache file (`out/<time-period>/cache/enriched_candidates.json.gz`). No additional path configuration is required.
 - **CLI equivalent**: `--resume-from-enriched`
 
 #### `pipeline.payload_version`
@@ -131,19 +106,30 @@ biotools-annotate --write-default-config
 - **CLI equivalent**: `--input`
 - **Example**: `"data/candidates.json"`
 
-#### `pipeline.model`
-- **Type**: String
-- **Default**: `"llama3.2"`
-- **Description**: Ollama model name for LLM assessment
-- **CLI equivalent**: `--model`
-- **Example**: `"llama3.1:8b"`
+#### `pipeline.resume_from_pub2tools`
+- **Type**: Boolean
+- **Default**: `false`
+- **Description**: When `true`, the pipeline skips the Pub2Tools CLI invocation and reuses the most recent `to_biotools.json` export found in the time-period or global `pub2tools/` cache folders. No manual path configuration is required.
+- **CLI equivalent**: `--resume-from-pub2tools`
 
-#### `pipeline.concurrency`
-- **Type**: Integer
-- **Default**: `8`
-- **Description**: Maximum concurrent jobs for fetching/scraping
-- **CLI equivalent**: `--concurrency`
-- **Example**: `16`
+#### `pipeline.resume_from_scoring`
+- **Type**: Boolean
+- **Default**: `false`
+- **Description**: When `true`, the pipeline reuses the cached `reports/assessment.jsonl` for the time-period folder, reapplies the current score thresholds, and regenerates payload outputs without invoking the LLM scorer again. Requires the enriched candidates cache to be present (automatically handled when `pipeline.resume_from_enriched` is also `true`).
+- **CLI equivalent**: `--resume-from-scoring`
+
+#### `pipeline.min_bio_score`
+- **Type**: Float (0.0–1.0)
+- **Default**: `0.6`
+- **Description**: Minimum biological relevance score required for a candidate to be included in the payload. Scores come from either heuristic scoring or the LLM rubric (`A1`–`A5`).
+- **CLI equivalent**: `--min-bio-score`
+
+#### `pipeline.min_documentation_score`
+- **Type**: Float (0.0–1.0)
+- **Default**: `0.6`
+- **Description**: Minimum documentation quality score required for inclusion, derived from rubric items `B1`–`B5`. Candidates that fail to meet this threshold are reported but excluded from the payload.
+- **CLI equivalent**: `--min-doc-score`
+- **Compatibility**: The legacy `pipeline.min_score` and `--min-score` options, when present, set both thresholds to the same value.
 
 ### Ollama Configuration
 
@@ -152,6 +138,31 @@ biotools-annotate --write-default-config
 - **Default**: `"http://localhost:11434"`
 - **Description**: Ollama server URL
 - **Example**: `"http://localhost:11434"`
+
+#### `ollama.model`
+- **Type**: String
+- **Default**: `"llama3.2"`
+- **Description**: Default Ollama model name used for LLM assessment when the CLI flag is omitted.
+- **CLI equivalent**: `--model`
+
+#### `ollama.max_retries`
+- **Type**: Integer
+- **Default**: `3`
+- **Description**: Number of retry attempts for Ollama HTTP calls after the initial request. Setting `0` disables automatic retries.
+- **Example**: `5`
+
+#### `ollama.retry_backoff_seconds`
+- **Type**: Float (seconds)
+- **Default**: `2.0`
+- **Description**: Fixed delay between Ollama retry attempts (applied to both HTTP session retries and LLM generation retries).
+- **Example**: `0.5`
+
+#### `ollama.concurrency`
+- **Type**: Integer
+- **Default**: `8`
+- **Description**: Maximum number of concurrent scoring workers (shared by both heuristic and LLM scoring).
+- **CLI equivalent**: `--concurrency`
+- **Example**: `16`
 
 ### Logging Configuration
 
@@ -249,7 +260,8 @@ biotools-annotate --write-default-config
 ```yaml
 pipeline:
   since: "7d"
-  min_score: 0.6
+  min_bio_score: 0.6
+  min_documentation_score: 0.6
   concurrency: 16
 
 logging:
@@ -265,7 +277,8 @@ pub2tools:
 
 pipeline:
   since: "30d"
-  min_score: 0.8
+  min_bio_score: 0.8
+  min_documentation_score: 0.75
   limit: 100
   model: "llama3.1:8b"
   concurrency: 8
@@ -284,7 +297,8 @@ logging:
 ```yaml
 pipeline:
   since: "2024-01-01"
-  min_score: 0.6
+  min_bio_score: 0.6
+  min_documentation_score: 0.6
 ```
 
 ## Troubleshooting
@@ -316,15 +330,17 @@ When migrating from command-line arguments to config file:
 
 | CLI Argument | Config Path |
 |-------------|-------------|
-| `--model llama3.1` | `pipeline.model: "llama3.1"` |
-| `--concurrency 16` | `pipeline.concurrency: 16` |
+| `--model llama3.1` | `ollama.model: "llama3.1"` |
+| `--concurrency 16` | `ollama.concurrency: 16` |
 | `--p2t-cli /path/to/pub2tools` | `pub2tools.p2t_cli: "/path/to/pub2tools"` |
 | `--p2t-cli "java -jar /path/to/jar"` | `pub2tools.p2t_cli: "java -jar /path/to/jar"` |
+| `--min-bio-score 0.7` | `pipeline.min_bio_score: 0.7` |
+| `--min-doc-score 0.65` | `pipeline.min_documentation_score: 0.65` |
 
 ## Best Practices
 
 1. **Start simple**: Use default config and override specific parameters
-2. **Use relative time**: Prefer `"7d"` over specific dates for `pub2tools.from_date`
+2. **Use relative time**: Prefer `"7d"` over specific dates for `pipeline.from_date`
 3. **Set reasonable limits**: Use `limit` for testing with large datasets
 4. **Enable logging**: Set `logging.file` for production use
 5. **Test configuration**: Use `--dry-run` to validate settings

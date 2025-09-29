@@ -1,4 +1,5 @@
 import csv
+import gzip
 import json
 
 
@@ -124,23 +125,25 @@ def test_execute_run_emits_csv_with_identifiers(tmp_path, monkeypatch):
     input_path = tmp_path / "candidates.json"
     input_path.write_text(json.dumps(candidates), encoding="utf-8")
 
-    report_path = tmp_path / "report.jsonl"
-    output_path = tmp_path / "payload.json"
-
     execute_run(
         from_date="7d",
         to_date=None,
-        min_score=0.6,
+        min_bio_score=0.6,
+        min_doc_score=0.6,
         limit=None,
         dry_run=True,
-        output=output_path,
-        report=report_path,
         model="llama3.2",
         concurrency=1,
         input_path=str(input_path),
         offline=False,
+        show_progress=False,
+        output_root=tmp_path / "out",
     )
 
+    out_dir = tmp_path / "out"
+    time_period_dirs = list(out_dir.glob("range_*"))
+    assert len(time_period_dirs) == 1
+    report_path = time_period_dirs[0] / "reports" / "assessment.jsonl"
     csv_path = report_path.with_suffix(".csv")
     with csv_path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -175,25 +178,27 @@ def test_execute_run_writes_updated_entries_file(tmp_path, monkeypatch):
     input_path = tmp_path / "candidates.json"
     input_path.write_text(json.dumps(candidates), encoding="utf-8")
 
-    payload_path = tmp_path / "payload.json"
-    report_path = tmp_path / "report.jsonl"
-    updated_path = tmp_path / "updated.json"
-
     execute_run(
         from_date="7d",
         to_date=None,
-        min_score=0.6,
+        min_bio_score=0.6,
+        min_doc_score=0.6,
         limit=None,
         dry_run=False,
-        output=payload_path,
-        report=report_path,
-        updated_entries=updated_path,
         model="llama3.2",
         concurrency=1,
         input_path=str(input_path),
         offline=False,
         show_progress=False,
+        output_root=tmp_path / "out",
     )
+
+    out_dir = tmp_path / "out"
+    time_period_dirs = list(out_dir.glob("range_*"))
+    assert len(time_period_dirs) == 1
+    run_dir = time_period_dirs[0]
+    payload_path = run_dir / "exports" / "biotools_payload.json"
+    updated_path = run_dir / "exports" / "biotools_entries.json"
 
     assert payload_path.exists()
     assert updated_path.exists()
@@ -220,21 +225,18 @@ def test_execute_run_logs_score_duration(tmp_path, capfd):
     input_path = tmp_path / "candidates.json"
     input_path.write_text(json.dumps(candidates), encoding="utf-8")
 
-    payload_path = tmp_path / "payload.json"
-    report_path = tmp_path / "report.jsonl"
-
     execute_run(
         from_date="7d",
         to_date=None,
-        min_score=0.6,
+        min_bio_score=0.6,
+        min_doc_score=0.6,
         limit=None,
         dry_run=True,
-        output=payload_path,
-        report=report_path,
         concurrency=1,
         input_path=str(input_path),
         offline=True,
         show_progress=False,
+        output_root=tmp_path / "out",
     )
 
     captured = capfd.readouterr()
@@ -257,7 +259,6 @@ def test_resume_from_enriched_cache(tmp_path, monkeypatch):
             "publication": [{"pmid": "999"}],
         }
     ]
-    cache_path = tmp_path / "enriched.json.gz"
     input_path = tmp_path / "candidates.json"
     input_path.write_text(json.dumps(candidates), encoding="utf-8")
 
@@ -265,35 +266,179 @@ def test_resume_from_enriched_cache(tmp_path, monkeypatch):
     execute_run(
         from_date="7d",
         to_date=None,
-        min_score=0.6,
+        min_bio_score=0.6,
+        min_doc_score=0.6,
         limit=None,
         dry_run=True,
-        output=tmp_path / "payload1.json",
-        report=tmp_path / "report1.jsonl",
-        enriched_cache=cache_path,
         model="llama3.2",
         concurrency=1,
         input_path=str(input_path),
         offline=True,
         show_progress=False,
+        output_root=tmp_path / "out",
     )
+    out_dir = tmp_path / "out"
+    time_period_dirs = list(out_dir.glob("range_*"))
+    assert len(time_period_dirs) == 1
+    run_dir = time_period_dirs[0]
+    cache_path = run_dir / "cache" / "enriched_candidates.json.gz"
     assert cache_path.exists()
 
     # Resume from cache without providing input path
     execute_run(
         from_date="7d",
         to_date=None,
-        min_score=0.6,
+        min_bio_score=0.6,
+        min_doc_score=0.6,
         limit=None,
         dry_run=False,
-        output=tmp_path / "payload2.json",
-        report=tmp_path / "report2.jsonl",
-        enriched_cache=cache_path,
         resume_from_enriched=True,
         model="llama3.2",
         concurrency=1,
         input_path=None,
         offline=True,
         show_progress=False,
+        output_root=tmp_path / "out",
     )
-    assert (tmp_path / "payload2.json").exists()
+    payload_path = run_dir / "exports" / "biotools_payload.json"
+    assert payload_path.exists()
+
+
+def test_resume_from_pub2tools_export(tmp_path, monkeypatch):
+    from biotoolsllmannotate.cli.run import execute_run
+    import biotoolsllmannotate.assess.scorer as scorer_module
+
+    monkeypatch.setattr(
+        scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
+    )
+
+    out_root = tmp_path / "out"
+    range_dir = out_root / "range_2024-01-01_to_2024-01-31"
+    export_dir = range_dir / "pub2tools"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    export_path = export_dir / "to_biotools.json"
+    export_path.write_text(
+        json.dumps(
+            [
+                {
+                    "title": "Bioinformatics Resume Tool",
+                    "description": "Cached via pub2tools",
+                    "urls": ["https://resume.example"],
+                    "publication": [{"pmid": "777"}],
+                    "tags": ["bioinformatics"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    execute_run(
+        from_date="2024-01-01",
+        to_date="2024-01-31",
+        min_bio_score=0.6,
+        min_doc_score=0.6,
+        dry_run=False,
+        resume_from_pub2tools=True,
+        offline=True,
+        show_progress=False,
+        model="llama3.2",
+        concurrency=1,
+        output_root=out_root,
+    )
+
+    payload_path = range_dir / "exports" / "biotools_payload.json"
+    assert payload_path.exists()
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    assert payload[0]["name"] == "Bioinformatics Resume Tool"
+
+
+def test_resume_from_scoring(tmp_path, monkeypatch):
+    from biotoolsllmannotate.cli.run import execute_run
+    import biotoolsllmannotate.assess.scorer as scorer_module
+
+    monkeypatch.setattr(
+        scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
+    )
+
+    out_root = tmp_path / "out"
+    range_dir = out_root / "range_2024-02-01_to_2024-02-28"
+    cache_dir = range_dir / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "enriched_candidates.json.gz"
+
+    enriched_candidates = [
+        {
+            "tool_id": "resume-stage",
+            "title": "Resume Stage Tool",
+            "description": "Cached stage tool",
+            "urls": ["https://resume-stage.example"],
+            "publication": [{"pmid": "888"}],
+            "tags": ["bioinformatics"],
+        }
+    ]
+    with gzip.open(cache_path, "wt", encoding="utf-8") as fh:
+        json.dump(enriched_candidates, fh)
+
+    report_dir = range_dir / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "assessment.jsonl"
+    cached_rows = [
+        {
+            "id": "resume-stage",
+            "title": "Resume Stage Tool",
+            "homepage": "",
+            "scores": {
+                "tool_name": "Resume Stage Tool",
+                "homepage": "https://resume-stage.example",
+                "publication_ids": ["pmid:888"],
+                "bio_score": 0.9,
+                "bio_subscores": {"A1": 1.0, "A2": 1.0, "A3": 1.0, "A4": 1.0, "A5": 0.5},
+                "documentation_score": 0.8,
+                "documentation_subscores": {
+                    "B1": 1.0,
+                    "B2": 1.0,
+                    "B3": 1.0,
+                    "B4": 0.5,
+                    "B5": 0.5,
+                },
+                "concise_description": "Short summary.",
+            },
+            "include": False,
+        }
+    ]
+    report_path.write_text(
+        "\n".join(json.dumps(row) for row in cached_rows) + "\n",
+        encoding="utf-8",
+    )
+
+    execute_run(
+        from_date="2024-02-01",
+        to_date="2024-02-28",
+        min_bio_score=0.6,
+        min_doc_score=0.6,
+        dry_run=False,
+        resume_from_enriched=True,
+        resume_from_scoring=True,
+        offline=True,
+        show_progress=False,
+        model="llama3.2",
+        concurrency=1,
+        output_root=out_root,
+    )
+
+    payload_path = range_dir / "exports" / "biotools_payload.json"
+    assert payload_path.exists()
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    assert payload[0]["name"] == "Resume Stage Tool"
+
+    report_lines = [
+        json.loads(line)
+        for line in report_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(report_lines) == 1
+    assert report_lines[0]["include"] is True

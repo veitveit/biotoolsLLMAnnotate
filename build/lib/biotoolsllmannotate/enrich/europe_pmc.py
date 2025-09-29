@@ -323,8 +323,31 @@ def enrich_candidates_with_europe_pmc(
 def _extract_publications(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     pubs = candidate.get("publication") or candidate.get("publications") or []
     if isinstance(pubs, dict):
-        return [pubs]
-    return [p for p in pubs if isinstance(p, dict)]
+        pubs = [pubs]
+    result = [p for p in pubs if isinstance(p, dict)]
+    if result:
+        return result
+
+    fallback: list[dict[str, str]] = []
+    for raw in candidate.get("publication_ids", []) or []:
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if not text:
+            continue
+        prefix, _, value = text.partition(":")
+        prefix = prefix.strip().lower()
+        value = value.strip()
+        entry: dict[str, str] = {}
+        if prefix in {"pmid", "pmcid", "doi"} and value:
+            entry[prefix] = value
+        elif prefix and value:
+            entry[prefix] = value
+        elif text:
+            entry["ext_id"] = text
+        if entry:
+            fallback.append(entry)
+    return fallback
 
 
 def _select_identifiers(publication: dict[str, Any]) -> list[tuple[str, str]]:
