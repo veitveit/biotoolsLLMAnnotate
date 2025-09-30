@@ -382,7 +382,7 @@ def test_resume_from_pub2tools_ignores_other_ranges(tmp_path, monkeypatch):
                     "description": "Correct range",
                     "urls": ["https://target.example"],
                     "publication": [{"pmid": "999"}],
-                        "tags": ["bioinformatics"],
+                    "tags": ["bioinformatics"],
                 }
             ]
         ),
@@ -402,7 +402,7 @@ def test_resume_from_pub2tools_ignores_other_ranges(tmp_path, monkeypatch):
                     "description": "Different range",
                     "urls": ["https://other.example"],
                     "publication": [{"pmid": "111"}],
-                        "tags": ["bioinformatics"],
+                    "tags": ["bioinformatics"],
                 }
             ]
         ),
@@ -472,7 +472,13 @@ def test_resume_from_scoring(tmp_path, monkeypatch):
                 "homepage": "https://resume-stage.example",
                 "publication_ids": ["pmid:888"],
                 "bio_score": 0.9,
-                "bio_subscores": {"A1": 1.0, "A2": 1.0, "A3": 1.0, "A4": 1.0, "A5": 0.5},
+                "bio_subscores": {
+                    "A1": 1.0,
+                    "A2": 1.0,
+                    "A3": 1.0,
+                    "A4": 1.0,
+                    "A5": 0.5,
+                },
                 "documentation_score": 0.8,
                 "documentation_subscores": {
                     "B1": 1.0,

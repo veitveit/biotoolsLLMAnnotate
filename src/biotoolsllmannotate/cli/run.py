@@ -671,7 +671,7 @@ def _load_assessment_report(path: Path) -> list[dict[str, Any]]:
 
 
 def _build_candidate_index(
-    candidates: Iterable[dict[str, Any]]
+    candidates: Iterable[dict[str, Any]],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     by_id: dict[str, dict[str, Any]] = {}
     by_title: dict[str, dict[str, Any]] = {}
@@ -1527,7 +1527,9 @@ def execute_run(
                             title or candidate_id or "<unknown>",
                             exc,
                         )
-                        set_status(3, "SCORE – temporary LLM failure, heuristics applied")
+                        set_status(
+                            3, "SCORE – temporary LLM failure, heuristics applied"
+                        )
                         return heuristic_score_one(c)
                     include = include_candidate(
                         scores,

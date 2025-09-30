@@ -15,6 +15,7 @@ def _replace_version_placeholders(value):
         return value.replace("__VERSION__", __version__)
     return value
 
+
 DEFAULT_CONFIG_YAML = {
     "pub2tools": {
         "edam_owl": "http://edamontology.org/EDAM.owl",
@@ -30,7 +31,7 @@ DEFAULT_CONFIG_YAML = {
     },
     "pipeline": {
         "input_path": None,
-    "payload_version": __version__,
+        "payload_version": __version__,
         "resume_from_enriched": False,
         "from_date": "7d",
         "to_date": None,

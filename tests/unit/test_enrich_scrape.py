@@ -172,3 +172,73 @@ def test_scrape_homepage_follows_frames():
     assert "usage" in keywords or "usage guide" in keywords
     docs = {d.get("url") for d in candidate.get("documentation", [])}
     assert "https://example.org/manual" in docs
+
+
+def test_scrape_homepage_skips_publication_link():
+    from biotoolsllmannotate.enrich.scraper import scrape_homepage_metadata
+
+    class DummySession:
+        def get(self, url, timeout, headers):
+            raise AssertionError("Should not fetch publication URLs")
+
+    class DummyLogger:
+        def warning(self, *args, **kwargs):
+            raise AssertionError("No warnings expected")
+
+    candidate = {
+        "homepage": "https://doi.org/10.1000/example",
+    }
+
+    scrape_homepage_metadata(
+        candidate,
+        config={},
+        logger=DummyLogger(),
+        session=DummySession(),
+    )
+
+    assert candidate.get("homepage") == "https://doi.org/10.1000/example"
+    assert candidate.get("homepage_scraped") is False
+    assert "documentation" not in candidate
+    assert candidate.get("documentation_keywords") is None
+
+
+def test_scrape_homepage_prefers_non_publication_url():
+    from biotoolsllmannotate.enrich.scraper import scrape_homepage_metadata
+
+    class DummyResponse:
+        status_code = 200
+        text = '<html><body><a href="/docs">Documentation</a></body></html>'
+
+    class DummySession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, timeout, headers):
+            self.calls.append(url)
+            if url == "https://example.org/tool":
+                return DummyResponse()
+            raise AssertionError(f"Unexpected URL fetched: {url}")
+
+    class DummyLogger:
+        def warning(self, *args, **kwargs):
+            raise AssertionError("No warnings expected")
+
+    candidate = {
+        "homepage": "https://doi.org/10.1000/example",
+        "urls": ["https://example.org/tool"],
+    }
+
+    session = DummySession()
+    scrape_homepage_metadata(
+        candidate,
+        config={},
+        logger=DummyLogger(),
+        session=session,
+    )
+
+    assert candidate.get("homepage") == "https://example.org/tool"
+    assert session.calls == ["https://example.org/tool"]
+    assert candidate.get("homepage_scraped") is True
+    docs = candidate.get("documentation") or []
+    doc_urls = {entry.get("url") for entry in docs}
+    assert "https://example.org/docs" in doc_urls

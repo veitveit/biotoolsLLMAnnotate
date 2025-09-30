@@ -20,6 +20,25 @@ biotools-annotate --write-default-config
 
 ## Parameter Reference
 
+### How to read this guide
+- **Config key**: YAML path under `config.yaml` (e.g., `pipeline.min_bio_score`).
+- **CLI flag**: Equivalent command-line option, when available.
+- **Invocation priority**: CLI flag > environment variable > config file > default.
+
+| Config key | CLI flag | Description |
+| --- | --- | --- |
+| `pipeline.input_path` | `--input` | Load candidates from an existing JSON export |
+| `pipeline.from_date` / `pipeline.to_date` | `--from-date` / `--to-date` | Control date window for gathering candidates |
+| `pipeline.resume_from_enriched` | `--resume-from-enriched` | Reuse cached enriched candidates |
+| `pipeline.resume_from_pub2tools` | `--resume-from-pub2tools` | Reuse cached `to_biotools.json` export |
+| `pipeline.resume_from_scoring` | `--resume-from-scoring` | Reapply thresholds without rerunning scoring |
+| `pipeline.min_bio_score` | `--min-bio-score` | Minimum LLM bio score required |
+| `pipeline.min_documentation_score` | `--min-doc-score` | Minimum documentation score required |
+| `ollama.model` | `--model` | Ollama model to invoke |
+| `ollama.concurrency` | `--concurrency` | Number of parallel scoring workers |
+| `logging.level` | `--verbose` / `--quiet` | Adjust logging verbosity |
+| `logging.file` | *(config only)* | Write logs to a specific file |
+
 ### Pub2Tools Configuration
 
 #### `pub2tools.edam_owl`
