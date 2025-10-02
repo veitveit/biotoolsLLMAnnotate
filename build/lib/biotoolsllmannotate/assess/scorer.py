@@ -4,6 +4,129 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .ollama_client import OllamaClient, OllamaConnectionError
 from biotoolsllmannotate.config import get_config_yaml
+from biotoolsllmannotate.enrich import is_probable_publication_url
+
+
+JSON_RESPONSE_SCHEMA = """{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "tool_name",
+    "homepage",
+    "publication_ids",
+    "bio_subscores",
+    "documentation_subscores",
+    "concise_description",
+    "rationale"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "tool_name": {"type": "string"},
+    "homepage": {"type": "string"},
+    "publication_ids": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "bio_subscores": {
+      "type": "object",
+      "required": ["A1", "A2", "A3", "A4", "A5"],
+      "properties": {
+        "A1": {"type": "number"},
+        "A2": {"type": "number"},
+        "A3": {"type": "number"},
+        "A4": {"type": "number"},
+        "A5": {"type": "number"}
+      },
+      "additionalProperties": {"type": "number"}
+    },
+    "documentation_subscores": {
+      "type": "object",
+      "required": ["B1", "B2", "B3", "B4", "B5"],
+      "properties": {
+        "B1": {"type": "number"},
+        "B2": {"type": "number"},
+        "B3": {"type": "number"},
+        "B4": {"type": "number"},
+        "B5": {"type": "number"}
+      },
+      "additionalProperties": {"type": "number"}
+    },
+    "concise_description": {"type": "string"},
+    "rationale": {"type": "string"}
+  }
+}"""
+
+_EXPECTED_TOP_LEVEL_TYPES = {
+    "tool_name": str,
+    "homepage": str,
+    "publication_ids": list,
+    "bio_subscores": Mapping,
+    "documentation_subscores": Mapping,
+    "concise_description": str,
+    "rationale": str,
+}
+
+_BIO_KEYS = ("A1", "A2", "A3", "A4", "A5")
+_DOC_KEYS = ("B1", "B2", "B3", "B4", "B5")
+
+
+def _schema_validation_errors(response: Any) -> List[str]:
+    errors: List[str] = []
+    if not isinstance(response, Mapping):
+        return ["response is not a JSON object"]
+
+    for key, expected_type in _EXPECTED_TOP_LEVEL_TYPES.items():
+        if key not in response:
+            errors.append(f"missing field '{key}'")
+            continue
+        value = response[key]
+        if not isinstance(value, expected_type):
+            errors.append(
+                f"field '{key}' must be of type {expected_type.__name__}, got {type(value).__name__}"
+            )
+
+    publication_ids = response.get("publication_ids")
+    if isinstance(publication_ids, list):
+        for idx, item in enumerate(publication_ids):
+            if not isinstance(item, str):
+                errors.append(
+                    f"publication_ids[{idx}] must be a string, got {type(item).__name__}"
+                )
+
+    def _check_scores(container: Any, keys: Tuple[str, ...], label: str) -> None:
+        if not isinstance(container, Mapping):
+            errors.append(f"field '{label}' must be an object")
+            return
+        for key in keys:
+            if key not in container:
+                errors.append(f"missing field '{label}.{key}'")
+                continue
+            value = container[key]
+            if not isinstance(value, (int, float)):
+                errors.append(
+                    f"field '{label}.{key}' must be numeric, got {type(value).__name__}"
+                )
+        for extra_key, extra_value in container.items():
+            if extra_key in keys:
+                continue
+            if not isinstance(extra_value, (int, float)):
+                errors.append(
+                    f"field '{label}.{extra_key}' must be numeric, got {type(extra_value).__name__}"
+                )
+
+    _check_scores(response.get("bio_subscores"), _BIO_KEYS, "bio_subscores")
+    _check_scores(
+        response.get("documentation_subscores"), _DOC_KEYS, "documentation_subscores"
+    )
+
+    for text_field in ("tool_name", "homepage", "concise_description", "rationale"):
+        value = response.get(text_field)
+        if not isinstance(value, str):
+            errors.append(
+                f"field '{text_field}' must be a string, got {type(value).__name__}"
+            )
+
+    return errors
 
 
 def _safe_fill_template(template: str, fields: Mapping[str, Any]) -> str:
@@ -146,11 +269,17 @@ def _score_from_response(
 
 def _candidate_homepage(candidate: dict) -> str:
     homepage = candidate.get("homepage")
-    if isinstance(homepage, str) and homepage.strip():
-        return homepage.strip()
+    if isinstance(homepage, str):
+        stripped = homepage.strip()
+        if stripped and not is_probable_publication_url(stripped):
+            return stripped
     urls = candidate.get("urls") or []
     for url in urls:
         s = str(url).strip()
+        if not s:
+            continue
+        if is_probable_publication_url(s):
+            continue
         if s.startswith("http://") or s.startswith("https://"):
             return s
     return ""
@@ -170,17 +299,80 @@ class Scorer:
         if not candidate.get("title") and not candidate.get("name"):
             raise ValueError("Candidate must have either 'title' or 'name' field")
 
-        prompt = self._build_prompt(candidate)
+        base_prompt = self._build_prompt(candidate)
         origin_types = self._origin_types(candidate)
 
+        raw_schema_retries = self.config.get("ollama", {}).get("schema_retries", 1)
         try:
-            response = self.client.generate(prompt, model=self.model)
-        except OllamaConnectionError as e:
-            # Fallback to heuristic scoring if LLM fails
-            raise ValueError(f"LLM scoring failed: {e}")
-        # If response is a string, parse as JSON
-        if isinstance(response, str):
-            response = json.loads(response)
+            schema_retries = int(raw_schema_retries)
+        except (TypeError, ValueError):
+            schema_retries = 1
+        schema_retries = max(0, schema_retries)
+
+        attempts = 1 + schema_retries
+        response_payload: Optional[Dict[str, Any]] = None
+        last_errors: List[str] = []
+        successful_attempts: Optional[int] = None
+
+        for attempt in range(attempts):
+            prompt = (
+                base_prompt
+                if attempt == 0
+                else self._augment_prompt_with_errors(base_prompt, last_errors)
+            )
+            try:
+                raw_response = self.client.generate(prompt, model=self.model)
+            except OllamaConnectionError as e:
+                raise ValueError(f"LLM scoring failed: {e}") from e
+            except ValueError as e:
+                last_errors = [str(e)]
+                if attempt == attempts - 1:
+                    raise ValueError(
+                        "LLM scoring failed to produce valid JSON after retries"
+                    ) from e
+                continue
+
+            if isinstance(raw_response, str):
+                try:
+                    parsed_response = json.loads(raw_response)
+                except json.JSONDecodeError as exc:
+                    last_errors = [f"JSON parse error: {exc}"]
+                    if attempt == attempts - 1:
+                        raise ValueError(
+                            "LLM scoring produced invalid JSON after retries"
+                        ) from exc
+                    continue
+            elif isinstance(raw_response, Mapping):
+                parsed_response = dict(raw_response)
+            else:
+                last_errors = [
+                    f"Unexpected response type: {type(raw_response).__name__}"
+                ]
+                if attempt == attempts - 1:
+                    raise ValueError(
+                        "LLM scoring returned an unexpected payload type"
+                    )
+                continue
+
+            validation_errors = _schema_validation_errors(parsed_response)
+            if validation_errors:
+                last_errors = validation_errors
+                if attempt == attempts - 1:
+                    joined = "; ".join(validation_errors)
+                    raise ValueError(
+                        f"LLM scoring response violated schema after retries: {joined}"
+                    )
+                continue
+
+            response_payload = parsed_response
+            successful_attempts = attempt + 1
+            break
+
+        if response_payload is None:
+            raise ValueError("LLM scoring failed: empty response payload")
+
+        response = response_payload
+
         output_pub_ids = response.get("publication_ids")
         if isinstance(output_pub_ids, str):
             publication_ids = [output_pub_ids]
@@ -204,18 +396,30 @@ class Scorer:
             ("B1", "B2", "B3", "B4", "B5"),
         )
 
+        homepage_value = ""
+        for option in (response.get("homepage"), _candidate_homepage(candidate)):
+            if isinstance(option, str):
+                stripped = option.strip()
+                if stripped and not is_probable_publication_url(stripped):
+                    homepage_value = stripped
+                    break
+
+        model_params: Dict[str, Any] = {}
+        if successful_attempts is not None:
+            model_params["attempts"] = successful_attempts
+
         result = {
             "tool_name": response.get("tool_name")
             or candidate.get("title")
             or candidate.get("name", ""),
-            "homepage": response.get("homepage") or _candidate_homepage(candidate),
+            "homepage": homepage_value,
             "publication_ids": publication_ids,
             "bio_score": bio_score,
             "documentation_score": doc_score,
             "concise_description": response.get("concise_description", ""),
             "rationale": response.get("rationale", ""),
             "model": self.model,
-            "model_params": {},
+            "model_params": model_params,
             "origin_types": origin_types,
         }
         result["bio_subscores"] = bio_breakdown or {}
@@ -270,6 +474,11 @@ Do NOT compute aggregate scores; only fill the provided fields.
 Do not output any value outside [0.0, 1.0].
 Always emit every field in the output JSON exactly once.
 Emit ONLY the fields in the schema below. Use "" for unknown strings and [] if no publication identifiers are found. Do not output booleans/strings instead of numbers.
+
+JSON schema describing the required output:
+{json_schema}
+
+Before replying, validate your draft against this schema. If the JSON does not pass validation, fix it and revalidate until it does. Output only the validated JSON; never include commentary or surrounding text.
 
 Output: respond ONLY with a single JSON object shaped as:
 {{
@@ -337,9 +546,19 @@ Output: respond ONLY with a single JSON object shaped as:
                 "homepage_status": homepage_status or "",
                 "homepage_error": homepage_error or "",
                 "documentation_keywords": documentation_keywords,
+                "json_schema": JSON_RESPONSE_SCHEMA,
             },
         )
         return prompt
+
+    def _augment_prompt_with_errors(self, base_prompt: str, errors: Sequence[str]) -> str:
+        bullet_list = "\n".join(f"- {error}" for error in errors)
+        return (
+            f"{base_prompt}\n\n"
+            "The previous response did not validate against the JSON schema because:\n"
+            f"{bullet_list}\n"
+            "Respond again with a corrected JSON object that satisfies every rule."
+        )
 
     def _origin_types(self, candidate: dict) -> list[str]:
         """Return labels describing which candidate fields populated the prompt."""

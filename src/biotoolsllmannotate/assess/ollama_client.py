@@ -25,6 +25,16 @@ class OllamaClient:
         self.base_url = base_url or ollama_cfg.get("host", "http://localhost:11434")
         log_path = self.config.get("logging", {}).get("llm_log")
         self.llm_log_path = Path(log_path) if log_path else Path("out/logs/ollama.log")
+        raw_force_json = ollama_cfg.get("force_json_format", True)
+        if isinstance(raw_force_json, str):
+            self.force_json_format = raw_force_json.strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
+        else:
+            self.force_json_format = bool(raw_force_json)
 
         raw_retries = ollama_cfg.get("max_retries", self.config.get("max_attempts", 3))
         try:
@@ -76,6 +86,8 @@ class OllamaClient:
                 "temperature": temperature,
                 "top_p": top_p,
             }
+            if self.force_json_format:
+                payload["format"] = "json"
             if seed is not None:
                 payload["seed"] = seed
             try:

@@ -1,8 +1,8 @@
 pipeline:
   input_path: null
   payload_version: "__VERSION__"
-  from_date: "2025-01-01"
-  to_date: "2025-01-02"
+  from_date: "2025-01-02"
+  to_date: "2025-01-03"
   resume_from_pub2tools: true
   resume_from_enriched: true
   resume_from_scoring: false
@@ -33,7 +33,7 @@ enrichment:
 ollama:
   host: http://localhost:11434
   model: llama3.2
-  max_retries: 3
+  max_retries: 6
   retry_backoff_seconds: 2
   concurrency: 4
 logging:

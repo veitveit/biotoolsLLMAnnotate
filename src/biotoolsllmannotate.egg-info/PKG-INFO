@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: biotoolsllmannotate
-Version: 0.9.1
+Version: 0.9.2
 Summary: CLI to fetch Pub2Tools candidates, LLM-assess, improve, and emit bio.tools-ready annotations
 Author: Contributors
 Requires-Python: >=3.11

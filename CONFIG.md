@@ -176,6 +176,18 @@ biotools-annotate --write-default-config
 - **Description**: Fixed delay between Ollama retry attempts (applied to both HTTP session retries and LLM generation retries).
 - **Example**: `0.5`
 
+#### `ollama.force_json_format`
+- **Type**: Boolean
+- **Default**: `true`
+- **Description**: When enabled, requests Ollama to operate in JSON mode (`{"format": "json"}`) so the model is restricted to emitting valid JSON. Disable only if using a model that does not support JSON mode.
+- **Example**: `false`
+
+#### `ollama.schema_retries`
+- **Type**: Integer
+- **Default**: `1`
+- **Description**: Number of extra attempts the scorer makes when the LLM output fails schema validation (total attempts = `1 + schema_retries`). Validation errors are fed back into the prompt to encourage self-correction.
+- **Example**: `2`
+
 #### `ollama.concurrency`
 - **Type**: Integer
 - **Default**: `8`

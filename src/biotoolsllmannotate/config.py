@@ -120,6 +120,11 @@ Do not output any value outside [0.0, 1.0].
 Always emit every field in the output JSON exactly once.
 Emit ONLY the fields in the schema below. Use "" for unknown strings and [] if no publication identifiers are found. Do not output booleans/strings instead of numbers.
 
+JSON schema describing the required output:
+{json_schema}
+
+Before replying, validate your draft against this schema. If the JSON does not pass validation, fix it and revalidate until it does. Output only the validated JSON; never include commentary or surrounding text.
+
 Output: respond ONLY with a single JSON object shaped as:
 {{
 "tool_name": "<derived display name>",

@@ -196,7 +196,9 @@ def test_scrape_homepage_skips_publication_link():
         session=DummySession(),
     )
 
-    assert candidate.get("homepage") == "https://doi.org/10.1000/example"
+    assert candidate.get("homepage") is None
+    assert "homepage_filtered_url" not in candidate
+    assert candidate.get("homepage_error") == "filtered_publication_url"
     assert candidate.get("homepage_scraped") is False
     assert "documentation" not in candidate
     assert candidate.get("documentation_keywords") is None

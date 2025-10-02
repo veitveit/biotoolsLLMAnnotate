@@ -7,6 +7,23 @@ class StubClient:
     def generate(self, prompt, model=None, temperature=0.1, top_p=1.0, seed=None):
         # Return out-of-range to verify clamping in scorer
         return {
+            "tool_name": "GeneAnnotator",
+            "homepage": "",
+            "publication_ids": [],
+            "bio_subscores": {
+                "A1": 2,
+                "A2": 2,
+                "A3": 2,
+                "A4": 2,
+                "A5": 2,
+            },
+            "documentation_subscores": {
+                "B1": -1,
+                "B2": -1,
+                "B3": -1,
+                "B4": -1,
+                "B5": -1,
+            },
             "concise_description": "Concise summary.",
             "rationale": "test",
         }
@@ -20,21 +37,21 @@ def test_score_candidate_clamps_and_returns_rationale():
     assert result["tool_name"] == "GeneAnnotator"
     assert result["homepage"] == ""
     assert result["publication_ids"] == []
-    assert 0.0 <= result["bio_score"] <= 1.0
-    assert 0.0 <= result["documentation_score"] <= 1.0
+    assert result["bio_score"] == 1.0
+    assert result["documentation_score"] == 0.0
     assert result["bio_subscores"] == {
-        "A1": 0.0,
-        "A2": 0.0,
-        "A3": 0.0,
-        "A4": 0.0,
-        "A5": 0.0,
+        "A1": 2.0,
+        "A2": 2.0,
+        "A3": 2.0,
+        "A4": 2.0,
+        "A5": 2.0,
     }
     assert result["documentation_subscores"] == {
-        "B1": 0.0,
-        "B2": 0.0,
-        "B3": 0.0,
-        "B4": 0.0,
-        "B5": 0.0,
+        "B1": -1.0,
+        "B2": -1.0,
+        "B3": -1.0,
+        "B4": -1.0,
+        "B5": -1.0,
     }
     assert isinstance(result.get("rationale"), str) and result["rationale"]
     assert result["concise_description"] == "Concise summary."
@@ -46,6 +63,7 @@ class SubscoreClient:
         return {
             "tool_name": "LLM Tool",
             "homepage": "https://provided.example",
+            "publication_ids": ["DOI:10.1000/example"],
             "bio_subscores": {
                 "A1": 1,
                 "A2": 0.5,
@@ -88,6 +106,98 @@ def test_score_candidate_averages_subscores():
         "B4": 0.0,
         "B5": 0.0,
     }
+
+
+class RetryClient:
+    def __init__(self):
+        self.calls = 0
+        self.prompts = []
+
+    def generate(self, prompt, model=None, temperature=0.1, top_p=1.0, seed=None):
+        self.calls += 1
+        self.prompts.append(prompt)
+        if self.calls == 1:
+            return {
+                "tool_name": "",
+                "homepage": "",
+                "publication_ids": [],
+                "bio_subscores": {"A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5": 0},
+                "documentation_subscores": {
+                    "B1": 0,
+                    "B2": 0,
+                    "B3": 0,
+                    "B4": 0,
+                    "B5": "invalid",
+                },
+                "concise_description": "",
+                "rationale": "",
+            }
+        return {
+            "tool_name": "Retry Tool",
+            "homepage": "https://retry.example",
+            "publication_ids": ["PMID:12345"],
+            "bio_subscores": {"A1": 1, "A2": 1, "A3": 1, "A4": 1, "A5": 1},
+            "documentation_subscores": {
+                "B1": 1,
+                "B2": 1,
+                "B3": 1,
+                "B4": 1,
+                "B5": 1,
+            },
+            "concise_description": "Valid summary.",
+            "rationale": "Valid rationale.",
+        }
+
+
+def test_score_candidate_retries_on_schema_failure():
+    candidate = {"title": "Retry Tool"}
+    scorer = Scorer()
+    retry_client = RetryClient()
+    scorer.client = retry_client
+    scorer.config.setdefault("ollama", {})["schema_retries"] = 1
+    result = scorer.score_candidate(candidate)
+
+    assert retry_client.calls == 2
+    assert any(
+        "The previous response did not validate" in prompt
+        for prompt in retry_client.prompts[1:]
+    )
+    assert result["tool_name"] == "Retry Tool"
+    assert result["homepage"] == "https://retry.example"
+
+
+class PublicationHomepageClient:
+    def generate(self, prompt, model=None, temperature=0.1, top_p=1.0, seed=None):
+        return {
+            "tool_name": "Publication Tool",
+            "homepage": "https://www.ncbi.nlm.nih.gov/pubmed/?term=39745644",
+            "publication_ids": ["PMID:39745644"],
+            "bio_subscores": {"A1": 1, "A2": 1, "A3": 1, "A4": 1, "A5": 1},
+            "documentation_subscores": {
+                "B1": 1,
+                "B2": 1,
+                "B3": 1,
+                "B4": 1,
+                "B5": 1,
+            },
+            "concise_description": "Desc.",
+            "rationale": "Rat.",
+        }
+
+
+def test_score_candidate_filters_publication_homepage_from_response():
+    candidate = {
+        "title": "Publication Tool",
+        "homepage": None,
+        "urls": ["https://www.ncbi.nlm.nih.gov/pubmed/?term=39745644"],
+    }
+    scorer = Scorer()
+    scorer.client = PublicationHomepageClient()
+
+    result = scorer.score_candidate(candidate)
+
+    assert result["homepage"] == ""
+    assert "homepage" not in result.get("origin_types", [])
 
 
 def test_clamp_score():

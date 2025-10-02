@@ -25,7 +25,10 @@ from rich.table import Table
 from biotoolsllmannotate import __version__ as PACKAGE_VERSION
 from biotoolsllmannotate.io.payload_writer import PayloadWriter
 from biotoolsllmannotate.schema.models import BioToolsEntry
-from biotoolsllmannotate.enrich import scrape_homepage_metadata
+from biotoolsllmannotate.enrich import (
+    is_probable_publication_url,
+    scrape_homepage_metadata,
+)
 from biotoolsllmannotate.ingest.pub2tools_fetcher import merge_edam_tags
 
 
@@ -671,7 +674,7 @@ def _load_assessment_report(path: Path) -> list[dict[str, Any]]:
 
 
 def _build_candidate_index(
-    candidates: Iterable[dict[str, Any]]
+    candidates: Iterable[dict[str, Any]],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     by_id: dict[str, dict[str, Any]] = {}
     by_title: dict[str, dict[str, Any]] = {}
@@ -722,10 +725,17 @@ def _resolve_homepage(
         selected_homepage,
         candidate.get("homepage"),
     ):
-        if isinstance(source, str) and source.strip():
-            return source.strip()
+        if isinstance(source, str):
+            stripped = source.strip()
+            if not stripped or is_probable_publication_url(stripped):
+                continue
+            return stripped
     for url in candidate.get("urls") or []:
         url_str = str(url).strip()
+        if not url_str:
+            continue
+        if is_probable_publication_url(url_str):
+            continue
         if url_str.startswith("http://") or url_str.startswith("https://"):
             return url_str
     return ""
@@ -1527,7 +1537,9 @@ def execute_run(
                             title or candidate_id or "<unknown>",
                             exc,
                         )
-                        set_status(3, "SCORE – temporary LLM failure, heuristics applied")
+                        set_status(
+                            3, "SCORE – temporary LLM failure, heuristics applied"
+                        )
                         return heuristic_score_one(c)
                     include = include_candidate(
                         scores,
@@ -1557,6 +1569,35 @@ def execute_run(
                             processed += 1
                             report_rows.append(decision)
                             scores = decision.get("scores", {})
+                            if scores.get("model") and scores.get("model") != "heuristic":
+                                summary_name = (
+                                    decision.get("title")
+                                    or decision.get("id")
+                                    or "<unknown>"
+                                )
+                                attempts = (
+                                    scores.get("model_params", {}).get("attempts")
+                                )
+                                attempts_display = attempts if attempts is not None else "n/a"
+                                bio_score = scores.get("bio_score")
+                                doc_score = scores.get("documentation_score")
+                                bio_display = (
+                                    f"{bio_score:.2f}"
+                                    if isinstance(bio_score, (int, float))
+                                    else "n/a"
+                                )
+                                doc_display = (
+                                    f"{doc_score:.2f}"
+                                    if isinstance(doc_score, (int, float))
+                                    else "n/a"
+                                )
+                                logger.info(
+                                    "SCORE LLM summary for '%s': attempts=%s bio=%s doc=%s",
+                                    summary_name,
+                                    attempts_display,
+                                    bio_display,
+                                    doc_display,
+                                )
                             if include:
                                 payload.append(to_entry(c, homepage))
                                 accepted_records.append((c, scores, homepage))

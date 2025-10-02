@@ -163,10 +163,11 @@ __all__ = [
     "fetch_with_timeout",
     "extract_metadata",
     "scrape_homepage_metadata",
+    "is_probable_publication_url",
 ]
 
 
-def _is_probable_publication_url(url: str | None) -> bool:
+def is_probable_publication_url(url: str | None) -> bool:
     if not isinstance(url, str):
         return False
     candidate = url.strip()
@@ -361,17 +362,18 @@ def scrape_homepage_metadata(
         return
 
     homepage = homepage_candidates[0]
-    if _is_probable_publication_url(homepage):
+    if is_probable_publication_url(homepage):
         alternative = next(
-            (url for url in homepage_candidates if not _is_probable_publication_url(url)),
+            (url for url in homepage_candidates if not is_probable_publication_url(url)),
             None,
         )
         if alternative:
             homepage = alternative
         else:
-            candidate["homepage"] = homepage
+            candidate.pop("homepage", None)
             candidate.pop("homepage_status", None)
-            candidate.pop("homepage_error", None)
+            candidate.pop("homepage_filtered_url", None)
+            candidate["homepage_error"] = "filtered_publication_url"
             candidate["homepage_scraped"] = False
             return
 

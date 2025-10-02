@@ -15,6 +15,7 @@ def _replace_version_placeholders(value):
         return value.replace("__VERSION__", __version__)
     return value
 
+
 DEFAULT_CONFIG_YAML = {
     "pub2tools": {
         "edam_owl": "http://edamontology.org/EDAM.owl",
@@ -30,7 +31,7 @@ DEFAULT_CONFIG_YAML = {
     },
     "pipeline": {
         "input_path": None,
-    "payload_version": __version__,
+        "payload_version": __version__,
         "resume_from_enriched": False,
         "from_date": "7d",
         "to_date": None,
@@ -118,6 +119,11 @@ Do NOT compute aggregate scores; only fill the provided fields.
 Do not output any value outside [0.0, 1.0].
 Always emit every field in the output JSON exactly once.
 Emit ONLY the fields in the schema below. Use "" for unknown strings and [] if no publication identifiers are found. Do not output booleans/strings instead of numbers.
+
+JSON schema describing the required output:
+{json_schema}
+
+Before replying, validate your draft against this schema. If the JSON does not pass validation, fix it and revalidate until it does. Output only the validated JSON; never include commentary or surrounding text.
 
 Output: respond ONLY with a single JSON object shaped as:
 {{

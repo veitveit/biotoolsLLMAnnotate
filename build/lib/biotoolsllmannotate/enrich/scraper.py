@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Iterable
 from itertools import islice
@@ -7,13 +8,11 @@ from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from ..version import __version__
 
-DEFAULT_USER_AGENT = (
-    f"biotoolsllmannotate/{__version__} (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"
-)
+DEFAULT_USER_AGENT = f"biotoolsllmannotate/{__version__} (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"
 
 DOCUMENTATION_KEYWORDS: tuple[str, ...] = (
     # B1 – Documentation completeness
@@ -127,6 +126,36 @@ REPOSITORY_HOSTS: tuple[str, ...] = (
     "launchpad.net",
 )
 
+PUBLICATION_HOST_KEYWORDS: tuple[str, ...] = (
+    "doi.org",
+    "dx.doi.org",
+    "pubmed.ncbi.nlm.nih.gov",
+    "ncbi.nlm.nih.gov",
+    "link.springer.com",
+    "nature.com",
+    "sciencedirect.com",
+    "academic.oup.com",
+    "onlinelibrary.wiley.com",
+    "biomedcentral.com",
+    "journals.plos.org",
+    "frontiersin.org",
+    "researchgate.net",
+    "biorxiv.org",
+    "medrxiv.org",
+    "ieeexplore.ieee.org",
+    "dl.acm.org",
+    "jamanetwork.com",
+    "science.org",
+    "cell.com",
+    "hindawi.com",
+    "tandfonline.com",
+    "karger.com",
+    "spiedigitallibrary.org",
+    "iop.org",
+)
+
+_DOI_PATH_PATTERN = re.compile(r"/10\.[0-9]{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
+
 __all__ = [
     "DOCUMENTATION_KEYWORDS",
     "REPOSITORY_HOSTS",
@@ -134,7 +163,58 @@ __all__ = [
     "fetch_with_timeout",
     "extract_metadata",
     "scrape_homepage_metadata",
+    "is_probable_publication_url",
 ]
+
+
+def is_probable_publication_url(url: str | None) -> bool:
+    if not isinstance(url, str):
+        return False
+    candidate = url.strip()
+    if not candidate:
+        return False
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    if not host:
+        return False
+    if any(keyword in host for keyword in PUBLICATION_HOST_KEYWORDS):
+        return True
+    if host.endswith(".nih.gov") and ("pmc" in host or "/pmc" in path):
+        return True
+    if _DOI_PATH_PATTERN.search(path):
+        return True
+    return False
+
+
+def _candidate_homepage_urls(candidate: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        if not raw:
+            return
+        value = raw
+        if isinstance(value, dict):
+            value = value.get("url")
+        if not isinstance(value, str):
+            return
+        url = value.strip()
+        if not url or url in seen:
+            return
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return
+        seen.add(url)
+        urls.append(url)
+
+    _add(candidate.get("homepage"))
+    for extra in candidate.get("urls") or []:
+        _add(extra)
+
+    return urls
 
 
 def extract_homepage(html_content: str) -> str | None:
@@ -274,20 +354,31 @@ def scrape_homepage_metadata(
     config: dict[str, Any] | None,
     logger,
     session: requests.Session | None = None,
-    ) -> None:
+) -> None:
     """Fetch homepage HTML and enrich candidate with documentation/repository links."""
     cfg = config or {}
-    homepage = candidate.get("homepage")
-    if not isinstance(homepage, str) or not homepage.strip():
-        for url in candidate.get("urls") or []:
-            candidate_url = str(url).strip()
-            if candidate_url.startswith("http://") or candidate_url.startswith(
-                "https://"
-            ):
-                homepage = candidate_url
-                break
-    if not homepage:
+    homepage_candidates = _candidate_homepage_urls(candidate)
+    if not homepage_candidates:
         return
+
+    homepage = homepage_candidates[0]
+    if is_probable_publication_url(homepage):
+        alternative = next(
+            (url for url in homepage_candidates if not is_probable_publication_url(url)),
+            None,
+        )
+        if alternative:
+            homepage = alternative
+        else:
+            candidate.pop("homepage", None)
+            candidate.pop("homepage_status", None)
+            candidate.pop("homepage_filtered_url", None)
+            candidate["homepage_error"] = "filtered_publication_url"
+            candidate["homepage_scraped"] = False
+            return
+
+    if candidate.get("homepage") != homepage:
+        candidate["homepage"] = homepage
 
     timeout = cfg.get("timeout", 8)
     headers = {"User-Agent": cfg.get("user_agent", DEFAULT_USER_AGENT)}
@@ -318,7 +409,9 @@ def scrape_homepage_metadata(
             frame_response = sess.get(frame_url, timeout=timeout, headers=headers)
             if frame_response.status_code >= 400:
                 logger.warning(
-                    "SCRAPE frame %s failed with HTTP %s", frame_url, frame_response.status_code
+                    "SCRAPE frame %s failed with HTTP %s",
+                    frame_url,
+                    frame_response.status_code,
                 )
                 continue
             frame_meta = extract_metadata(frame_response.text, frame_url)
