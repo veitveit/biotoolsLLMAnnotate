@@ -1,13 +1,13 @@
 pipeline:
   input_path: null
   payload_version: "__VERSION__"
-  from_date: "2025-01-02"
-  to_date: "2025-01-03"
+  from_date: "2025-01-03"
+  to_date: "2025-01-04"
   resume_from_pub2tools: true
   resume_from_enriched: true
   resume_from_scoring: false
   min_bio_score: 0.6
-  min_documentation_score: 0.6
+  min_documentation_score: 0.5
 pub2tools:
   edam_owl: http://edamontology.org/EDAM.owl
   idf: https://github.com/edamontology/edammap/raw/master/doc/biotools.idf

@@ -50,7 +50,7 @@ python -m biotoolsllmannotate --resume-from-enriched --resume-from-scoring --dry
 ```
 
 ## Configuration
-Configuration is YAML-driven. The CLI loads `config.yaml` from the project root by default and falls back to internal defaults when absent. All placeholders marked `__VERSION__` resolve to the installed package version at runtime.
+Configuration is YAML-driven. The CLI loads `config.yaml` from the project root by default and falls back to internal defaults when absent. All placeholders marked `__VERSION__` resolve to the installed package version at runtime. During each run the pipeline scans the Pub2Tools export folders (for example `pub2tools/to_biotools.json` or `pub2tools/biotools_entries.json`) and uses them to flag candidates already present in bio.tools—no manual registry path is required.
 
 ### Core settings
 | Purpose | Config key | CLI flag | Notes |
@@ -60,6 +60,7 @@ Configuration is YAML-driven. The CLI loads `config.yaml` from the project root 
 | Thresholds | `pipeline.min_bio_score`, `pipeline.min_documentation_score` | `--min-bio-score`, `--min-doc-score` | Set both via legacy `--min-score` if desired |
 | Offline mode | `pipeline.offline` | `--offline` | Disables homepage scraping and Europe PMC enrichment |
 | Ollama model | `ollama.model` | `--model` | Defaults to `llama3.2`; override per run |
+| LLM temperature | `ollama.temperature` | (config only) | Lower values tighten determinism; default is `0.01` for high-precision scoring |
 | Concurrency | `ollama.concurrency` | `--concurrency` | Controls parallel scoring workers |
 | Logging | `logging.level`, `logging.file` | `--verbose`, `--quiet` | Flags override log level; file path set in config |
 
@@ -95,7 +96,7 @@ Each run writes artifacts to `out/<range_start>_to_<range_end>/...`:
 | `exports/biotools_payload.json` | biotoolsSchema-compliant payload ready for upload |
 | `exports/biotools_entries.json` | Full entries including enriched metadata |
 | `reports/assessment.jsonl` | Line-delimited scoring results (bio score, doc score, rationale) |
-| `reports/assessment.csv` | Spreadsheet-friendly summary of the JSONL file |
+| `reports/assessment.csv` | Spreadsheet-friendly summary of the JSONL file (includes an `in_biotools` column when Pub2Tools snapshots are present) |
 | `cache/enriched_candidates.json.gz` | Cached candidates after enrichment for quick resumes |
 | `logs/ollama.log` | Append-only log of all LLM scoring prompts and responses |
 | `config.generated.yaml` or `<original-config>.yaml` | Snapshot of the configuration used for the run |

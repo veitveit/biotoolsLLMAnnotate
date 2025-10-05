@@ -54,6 +54,22 @@ class OllamaClient:
         if self.retry_backoff_seconds < 0:
             self.retry_backoff_seconds = 0.0
 
+        raw_temperature = ollama_cfg.get("temperature", 0.01)
+        try:
+            self.temperature = float(raw_temperature)
+        except (TypeError, ValueError):
+            self.temperature = 0.01
+        if self.temperature < 0:
+            self.temperature = 0.0
+
+        raw_top_p = ollama_cfg.get("top_p", 1.0)
+        try:
+            self.top_p = float(raw_top_p)
+        except (TypeError, ValueError):
+            self.top_p = 1.0
+        if self.top_p <= 0:
+            self.top_p = 1.0
+
         # Setup session with connection pooling and retries
         self.session = requests.Session()
         retry_strategy = Retry(
@@ -68,7 +84,7 @@ class OllamaClient:
         self.session.mount("https://", adapter)
         self.session.headers.update({"Connection": "keep-alive"})
 
-    def generate(self, prompt, model=None, temperature=0.075, top_p=1.0, seed=None):
+    def generate(self, prompt, model=None, temperature=None, top_p=None, seed=None):
         from tenacity import retry, stop_after_attempt, wait_fixed
 
         max_attempts = max(1, 1 + self.max_retries)
@@ -80,11 +96,27 @@ class OllamaClient:
             reraise=True,
         )
         def _call():
+            resolved_temperature = self.temperature if temperature is None else temperature
+            try:
+                resolved_temperature = float(resolved_temperature)
+            except (TypeError, ValueError):
+                resolved_temperature = self.temperature
+            if resolved_temperature < 0:
+                resolved_temperature = 0.0
+
+            resolved_top_p = self.top_p if top_p is None else top_p
+            try:
+                resolved_top_p = float(resolved_top_p)
+            except (TypeError, ValueError):
+                resolved_top_p = self.top_p
+            if resolved_top_p <= 0:
+                resolved_top_p = self.top_p
+
             payload = {
                 "model": model or self.config.get("ollama", {}).get("model"),
                 "prompt": prompt,
-                "temperature": temperature,
-                "top_p": top_p,
+                "temperature": resolved_temperature,
+                "top_p": resolved_top_p,
             }
             if self.force_json_format:
                 payload["format"] = "json"

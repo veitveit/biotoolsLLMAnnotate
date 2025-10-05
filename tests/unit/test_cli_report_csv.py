@@ -59,6 +59,7 @@ def test_write_report_csv(tmp_path):
             "homepage": "https://example.org",
             "publication_ids": ["pmid:12345"],
             "include": True,
+            "in_biotools": True,
             "scores": {
                 "bio_score": 0.9,
                 "bio_subscores": {
@@ -105,6 +106,7 @@ def test_write_report_csv(tmp_path):
     assert row["tool_name"] == "Tool One"
     assert row["origin_types"] == "title, description"
     assert row["publication_ids"] == "pmid:12345"
+    assert row["in_biotools"] == "True"
 
 
 def test_execute_run_emits_csv_with_identifiers(tmp_path, monkeypatch):
@@ -157,6 +159,70 @@ def test_execute_run_emits_csv_with_identifiers(tmp_path, monkeypatch):
     assert row["title"] == "Example Tool"
     assert row["homepage"] == "https://example.org"
     assert row["tool_name"] == "Example Tool"
+    assert row["in_biotools"] == ""
+
+
+def test_execute_run_marks_existing_registry(tmp_path, monkeypatch):
+    from biotoolsllmannotate.cli.run import execute_run
+    import biotoolsllmannotate.assess.scorer as scorer_module
+    from biotoolsllmannotate.config import DEFAULT_CONFIG_YAML
+
+    monkeypatch.setattr(
+        scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
+    )
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+
+    registry_path = input_dir / "biotools.json"
+    registry_path.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "Registry Tool",
+                    "homepage": "https://registry.example",
+                    "biotoolsID": "registrytool",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    candidates = [
+        {
+            "title": "Registry Tool",
+            "urls": ["https://registry.example"],
+            "description": "Catalogued tool",
+        }
+    ]
+    input_path = input_dir / "candidates.json"
+    input_path.write_text(json.dumps(candidates), encoding="utf-8")
+
+    execute_run(
+        from_date="7d",
+        to_date=None,
+        min_bio_score=0.6,
+        min_doc_score=0.6,
+        dry_run=True,
+        concurrency=1,
+        input_path=str(input_path),
+        offline=True,
+        show_progress=False,
+        output_root=tmp_path / "out",
+    )
+
+    out_dir = tmp_path / "out"
+    time_period_dirs = list(out_dir.glob("range_*"))
+    assert len(time_period_dirs) == 1
+    report_path = time_period_dirs[0] / "reports" / "assessment.jsonl"
+    csv_path = report_path.with_suffix(".csv")
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        data = list(reader)
+
+    assert len(data) == 1
+    row = data[0]
+    assert row["in_biotools"] == "True"
 
 
 def test_execute_run_writes_updated_entries_file(tmp_path, monkeypatch):

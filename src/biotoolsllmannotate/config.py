@@ -45,6 +45,7 @@ DEFAULT_CONFIG_YAML = {
         "model": "llama3.2",
         "max_retries": 3,
         "retry_backoff_seconds": 2,
+        "temperature": 0.01,
         "concurrency": 8,
     },
     "logging": {

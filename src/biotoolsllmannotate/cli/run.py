@@ -25,6 +25,7 @@ from rich.table import Table
 from biotoolsllmannotate import __version__ as PACKAGE_VERSION
 from biotoolsllmannotate.io.payload_writer import PayloadWriter
 from biotoolsllmannotate.schema.models import BioToolsEntry
+from biotoolsllmannotate.registry import BioToolsRegistry, load_registry_from_pub2tools
 from biotoolsllmannotate.enrich import (
     is_probable_publication_url,
     scrape_homepage_metadata,
@@ -217,6 +218,7 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
         "homepage",
         "publication_ids",
         "include",
+        "in_biotools",
         "bio_score",
         "bio_A1",
         "bio_A2",
@@ -241,6 +243,7 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
             scores = row.get("scores") or {}
             bio_subscores = scores.get("bio_subscores") or {}
             doc_subscores = scores.get("documentation_subscores") or {}
+            in_registry_value = row.get("in_biotools")
             writer.writerow(
                 {
                     "id": row.get("id", ""),
@@ -249,6 +252,7 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
                     "homepage": row.get("homepage", ""),
                     "publication_ids": ", ".join(row.get("publication_ids", []) or []),
                     "include": row.get("include", False),
+                    "in_biotools": "" if in_registry_value is None else in_registry_value,
                     "bio_score": scores.get("bio_score", ""),
                     "bio_A1": bio_subscores.get("A1", ""),
                     "bio_A2": bio_subscores.get("A2", ""),
@@ -841,6 +845,8 @@ def execute_run(
     setup_logging(console=console)
     logger = get_logger("pipeline")
 
+    registry: BioToolsRegistry | None = None
+
     if log_fallback_message:
         logger.info(
             "Progress status: live mode disabled (%s); showing plain updates. Set BIOTOOLS_PROGRESS=force to override.",
@@ -1084,6 +1090,8 @@ def execute_run(
 
         candidates: list[dict[str, Any]] = []
         resumed = False
+        resume_export_path: Path | None = None
+        env_input: str | None = None
 
         if resume_from_enriched:
             if cache_path is None:
@@ -1127,7 +1135,6 @@ def execute_run(
             env_input = input_path or os.environ.get("BIOTOOLS_ANNOTATE_INPUT")
             if not env_input:
                 env_input = os.environ.get("BIOTOOLS_ANNOTATE_JSON")
-            resume_export_path: Path | None = None
             if resume_from_pub2tools and not env_input:
                 resume_export_path = _find_latest_pub2tools_export(
                     time_period_root / "pub2tools",
@@ -1215,6 +1222,20 @@ def execute_run(
                     set_status(0, "GATHER – Pub2Tools fetch failed")
                     candidates = candidates or []
 
+        registry_search_roots: list[Path] = []
+        pub2tools_dir = time_period_root / "pub2tools"
+        registry_search_roots.append(pub2tools_dir)
+        if resume_export_path is not None:
+            registry_search_roots.append(resume_export_path.parent)
+        if env_input:
+            registry_search_roots.append(Path(env_input).parent)
+
+        if registry is None:
+            for root in registry_search_roots:
+                registry = load_registry_from_pub2tools(root, logger=logger)
+                if registry:
+                    break
+
         if candidates:
             logger.info(step_msg(2, "DEDUP – Filter candidate list"))
             set_status(1, f"DEDUP – processing {len(candidates)} candidates")
@@ -1245,6 +1266,29 @@ def execute_run(
                 )
         else:
             set_status(1, "DEDUP – no candidates available")
+
+        if registry:
+            registry_hits = 0
+            for candidate in candidates:
+                name = candidate.get("title") or candidate.get("name")
+                homepage = candidate.get("homepage")
+                if not homepage:
+                    homepage = primary_homepage(candidate.get("urls") or [])
+                    if homepage:
+                        candidate.setdefault("homepage", homepage)
+                in_registry = registry.contains(name, homepage)
+                candidate["in_biotools"] = in_registry
+                if in_registry:
+                    registry_hits += 1
+            if candidates:
+                logger.info(
+                    "REGISTRY matched %d/%d candidates to existing bio.tools records",
+                    registry_hits,
+                    len(candidates),
+                )
+        else:
+            for candidate in candidates:
+                candidate["in_biotools"] = None
 
         if candidates and enriched_cache and not resume_from_enriched:
             _save_enriched_candidates(candidates, enriched_cache, logger)
@@ -1396,6 +1440,7 @@ def execute_run(
                         has_homepage=bool(homepage),
                     )
                     row["include"] = include
+                    row.setdefault("in_biotools", None)
                     unmatched_report_rows += 1
                     report_rows.append(row)
                     continue
@@ -1410,6 +1455,7 @@ def execute_run(
                 )
                 row["homepage"] = homepage
                 row["include"] = include
+                row["in_biotools"] = candidate.get("in_biotools")
                 report_rows.append(row)
                 if include:
                     payload.append(to_entry(candidate, homepage))
@@ -1474,6 +1520,7 @@ def execute_run(
                     "publication_ids": publication_ids,
                     "scores": scores,
                     "include": include,
+                    "in_biotools": c.get("in_biotools"),
                 }
                 return (decision, c, homepage, include)
 
@@ -1554,6 +1601,7 @@ def execute_run(
                         "publication_ids": publication_ids,
                         "scores": scores,
                         "include": include,
+                        "in_biotools": c.get("in_biotools"),
                     }
                     return (decision, c, homepage, include)
 
@@ -1569,16 +1617,21 @@ def execute_run(
                             processed += 1
                             report_rows.append(decision)
                             scores = decision.get("scores", {})
-                            if scores.get("model") and scores.get("model") != "heuristic":
+                            if (
+                                scores.get("model")
+                                and scores.get("model") != "heuristic"
+                            ):
                                 summary_name = (
                                     decision.get("title")
                                     or decision.get("id")
                                     or "<unknown>"
                                 )
-                                attempts = (
-                                    scores.get("model_params", {}).get("attempts")
+                                attempts = scores.get("model_params", {}).get(
+                                    "attempts"
                                 )
-                                attempts_display = attempts if attempts is not None else "n/a"
+                                attempts_display = (
+                                    attempts if attempts is not None else "n/a"
+                                )
                                 bio_score = scores.get("bio_score")
                                 doc_score = scores.get("documentation_score")
                                 bio_display = (
