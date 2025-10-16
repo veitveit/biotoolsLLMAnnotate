@@ -8,6 +8,11 @@ from typer.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
 
+# Ensure we import the in-repo CLI implementation even if an older installed
+# package version was loaded earlier during the pytest session.
+for module_name in ["biotoolsllmannotate.cli.main", "biotoolsllmannotate.cli"]:
+    sys.modules.pop(module_name, None)
+
 from biotoolsllmannotate.cli.main import app
 from biotoolsllmannotate.config import DEFAULT_CONFIG_YAML
 
