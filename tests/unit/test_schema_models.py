@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import pytest
 
 
-def test_biotools_entry_requires_minimal_fields():
+def test_biotools_entry_requires_minimal_fields() -> None:
     """BioToolsEntry requires name and description; payload has version and entries.
 
     Contract only: actual model lives in biotoolsllmannotate.schema.models.
@@ -50,7 +52,8 @@ def test_biotools_entry_requires_minimal_fields():
     assert payload.entries and payload.entries[0].name == "ExampleTool"
 
 
-def test_biotools_entry_missing_name_is_invalid():
+def test_biotools_entry_missing_name_is_invalid() -> None:
+    """Omitting name field raises a validation error."""
     from pydantic import ValidationError
 
     from biotoolsllmannotate.schema import models as sm

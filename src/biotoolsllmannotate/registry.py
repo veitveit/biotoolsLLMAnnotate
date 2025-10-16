@@ -104,6 +104,8 @@ class BioToolsRegistry:
     def __init__(self, source_path: Path):
         self.source_path = source_path
         self._names_by_homepage: dict[str, set[str]] = {}
+        self._homepages_by_name: dict[str, set[str]] = {}
+        self._all_names: set[str] = set()
         self._id_by_homepage_and_name: dict[tuple[str, str], str] = {}
         self._entry_count = 0
 
@@ -115,6 +117,7 @@ class BioToolsRegistry:
         names = {normalize_text(n) for n in _extract_names(entry) if normalize_text(n)}
         if not names:
             return
+        self._all_names.update(names)
         homepages = {
             _normalize_homepage(h)
             for h in _extract_homepages(entry)
@@ -132,27 +135,33 @@ class BioToolsRegistry:
             name_set = self._names_by_homepage.setdefault(homepage, set())
             for name in names:
                 name_set.add(name)
+                homes = self._homepages_by_name.setdefault(name, set())
+                homes.add(homepage)
                 if biotools_id:
                     self._id_by_homepage_and_name[(homepage, name)] = biotools_id
         self._entry_count += 1
+
+    def contains_name(self, name: str | None) -> bool:
+        if not name:
+            return False
+        normalized_name = normalize_text(name)
+        if not normalized_name:
+            return False
+        return normalized_name in self._all_names
 
     def contains(self, name: str | None, homepage: str | None) -> bool:
         match = self.lookup(name=name, homepage=homepage)
         return match is not None
 
-    def lookup(
-        self, name: str | None, homepage: str | None
-    ) -> Optional[RegistryMatch]:
+    def lookup(self, name: str | None, homepage: str | None) -> Optional[RegistryMatch]:
         if not name or not homepage:
             return None
         normalized_name = normalize_text(name)
         normalized_homepage = _normalize_homepage(homepage)
         if not normalized_name or not normalized_homepage:
             return None
-        candidate_names = self._names_by_homepage.get(normalized_homepage)
-        if not candidate_names:
-            return None
-        if normalized_name not in candidate_names:
+        candidate_homepages = self._homepages_by_name.get(normalized_name)
+        if not candidate_homepages or normalized_homepage not in candidate_homepages:
             return None
         source_id = self._id_by_homepage_and_name.get(
             (normalized_homepage, normalized_name)
@@ -175,16 +184,16 @@ class BioToolsRegistry:
         elif isinstance(data, dict):
             if isinstance(data.get("entries"), list):
                 entries = (
-                    entry for entry in data.get("entries", []) if isinstance(entry, dict)
+                    entry
+                    for entry in data.get("entries", [])
+                    if isinstance(entry, dict)
                 )
             elif isinstance(data.get("list"), list):
                 entries = (
                     entry for entry in data.get("list", []) if isinstance(entry, dict)
                 )
             else:
-                entries = (
-                    entry for entry in data.values() if isinstance(entry, dict)
-                )
+                entries = (entry for entry in data.values() if isinstance(entry, dict))
         else:
             entries = []
         for entry in entries:

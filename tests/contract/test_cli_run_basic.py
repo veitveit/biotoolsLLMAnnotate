@@ -38,9 +38,8 @@ def test_run_basic_creates_outputs(tmp_path):
 
     assert proc.returncode == 0
     out_dir = tmp_path / "out"
-    time_period_dirs = list(out_dir.glob("range_*"))
-    assert len(time_period_dirs) == 1
-    run_dir = time_period_dirs[0]
+    run_dir = out_dir / "custom_tool_set"
+    assert run_dir.exists()
     out_payload = run_dir / "exports" / "biotools_payload.json"
     out_report = run_dir / "reports" / "assessment.jsonl"
     assert out_payload.exists()

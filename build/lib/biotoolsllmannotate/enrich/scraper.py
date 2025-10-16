@@ -2,17 +2,104 @@ from __future__ import annotations
 
 import re
 import time
+from collections import deque
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
+from requests import exceptions as requests_exc
 from urllib.parse import urljoin, urlparse
 
 from ..version import __version__
 
 DEFAULT_USER_AGENT = f"biotoolsllmannotate/{__version__} (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"
+
+DEFAULT_MAX_BYTES = 2_000_000  # 2 MB
+DEFAULT_MAX_FRAME_FETCHES = 5
+DEFAULT_MAX_FRAME_DEPTH = 2
+
+_NUMERIC_STATUS_PATTERN = re.compile(r"^\s*(-?\d+)\s*$")
+
+
+class ContentTooLargeError(Exception):
+    """Raised when a fetched asset exceeds configured guardrails."""
+
+
+class NonHtmlContentError(Exception):
+    """Raised when the fetched asset is not HTML or text."""
+
+
+def _truncate_error(message: str, limit: int = 140) -> str:
+    clean = message.strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1].rstrip() + "…"
+
+
+def _classify_homepage_exception(exc: Exception) -> tuple[str, str]:
+    """Return a status label and concise error message for a requests failure."""
+
+    if isinstance(exc, requests_exc.Timeout):
+        return "timeout", "request timed out"
+    if isinstance(exc, requests_exc.ConnectionError):
+        return "connection_error", _truncate_error(str(exc))
+    if isinstance(exc, requests_exc.TooManyRedirects):
+        return "redirect_error", "too many redirects"
+    if isinstance(exc, requests_exc.InvalidURL):
+        return "invalid_url", _truncate_error(str(exc))
+    if isinstance(exc, requests_exc.SSLError):
+        return "ssl_error", _truncate_error(str(exc))
+    return "request_error", _truncate_error(str(exc))
+
+
+def _ensure_textual_response(response: requests.Response) -> None:
+    content_type = response.headers.get("Content-Type", "")
+    if (
+        content_type
+        and "html" not in content_type.lower()
+        and "text" not in content_type.lower()
+    ):
+        raise NonHtmlContentError(f"unsupported content-type: {content_type}")
+
+
+def _materialize_content(response: requests.Response, *, max_bytes: int) -> bytes:
+    header_size = response.headers.get("Content-Length")
+    if header_size:
+        try:
+            declared = int(header_size)
+        except (TypeError, ValueError):
+            declared = None
+        else:
+            if declared > max_bytes:
+                raise ContentTooLargeError(
+                    f"declared content length {declared} bytes exceeds limit {max_bytes}"
+                )
+
+    content = response.content
+    if len(content) > max_bytes:
+        raise ContentTooLargeError(
+            f"downloaded content length {len(content)} bytes exceeds limit {max_bytes}"
+        )
+    return content
+
+
+def _decode_html(content: bytes, response: requests.Response) -> str:
+    encoding = response.encoding or getattr(response, "apparent_encoding", None)
+    if encoding:
+        try:
+            return content.decode(encoding, errors="replace")
+        except (LookupError, TypeError):
+            pass
+    return content.decode("utf-8", errors="replace")
+
+
+def _extract_html(response: requests.Response, *, max_bytes: int) -> str:
+    _ensure_textual_response(response)
+    content = _materialize_content(response, max_bytes=max_bytes)
+    return _decode_html(content, response)
+
 
 DOCUMENTATION_KEYWORDS: tuple[str, ...] = (
     # B1 – Documentation completeness
@@ -217,6 +304,147 @@ def _candidate_homepage_urls(candidate: dict[str, Any]) -> list[str]:
     return urls
 
 
+def _coerce_homepage_status(value: Any) -> int | str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+    text = str(value).strip()
+    if not text:
+        return None
+    match = _NUMERIC_STATUS_PATTERN.match(text)
+    if match:
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            pass
+    return text
+
+
+def normalize_candidate_homepage(candidate: dict[str, Any]) -> None:
+    """Normalize homepage metadata fields sourced from Pub2Tools."""
+
+    if not isinstance(candidate, dict):
+        return
+
+    status: Any = candidate.get("homepage_status")
+    error: Any = candidate.get("homepage_error")
+    filtered_url: Any = candidate.get("homepage_filtered_url")
+
+    def _from_mapping(mapping: dict[str, Any]) -> None:
+        nonlocal status, error, filtered_url
+        if status is None:
+            for key in (
+                "status_code",
+                "statusCode",
+                "http_status",
+                "httpStatus",
+                "status",
+                "code",
+            ):
+                value = mapping.get(key)
+                if value not in (None, ""):
+                    status = value
+                    break
+        if error is None:
+            for key in (
+                "error",
+                "message",
+                "reason",
+                "status_text",
+                "statusText",
+            ):
+                value = mapping.get(key)
+                if value not in (None, ""):
+                    error = value
+                    break
+        if filtered_url is None:
+            for key in ("filtered_url", "filteredUrl", "filtered"):
+                value = mapping.get(key)
+                if value not in (None, ""):
+                    filtered_url = value
+                    break
+
+    raw_homepage = candidate.get("homepage")
+    if isinstance(raw_homepage, dict):
+        url_value = (
+            raw_homepage.get("url")
+            or raw_homepage.get("link")
+            or raw_homepage.get("href")
+        )
+        if isinstance(url_value, str) and url_value.strip():
+            candidate["homepage"] = url_value.strip()
+        _from_mapping(raw_homepage)
+    elif isinstance(raw_homepage, list):
+        for item in raw_homepage:
+            if isinstance(item, str) and item.strip():
+                candidate["homepage"] = item.strip()
+                break
+            if isinstance(item, dict):
+                url_value = item.get("url") or item.get("link") or item.get("href")
+                if isinstance(url_value, str) and url_value.strip():
+                    candidate["homepage"] = url_value.strip()
+                _from_mapping(item)
+                if candidate.get("homepage"):
+                    break
+    elif isinstance(raw_homepage, str):
+        candidate["homepage"] = raw_homepage.strip()
+
+    if status is None:
+        for key in (
+            "homepageStatus",
+            "homepage_status_code",
+            "homepageStatusCode",
+            "urlStatus",
+            "url_status",
+            "urlStatusCode",
+        ):
+            value = candidate.get(key)
+            if value not in (None, ""):
+                status = value
+                break
+
+    if error is None:
+        for key in (
+            "homepageError",
+            "urlError",
+            "homepage_error_message",
+            "homepageMessage",
+            "url_error",
+        ):
+            value = candidate.get(key)
+            if value not in (None, ""):
+                error = value
+                break
+
+    if filtered_url is None:
+        for key in (
+            "homepageFilteredUrl",
+            "homepage_filteredUrl",
+            "urlFiltered",
+        ):
+            value = candidate.get(key)
+            if value not in (None, ""):
+                filtered_url = value
+                break
+
+    if status is not None:
+        coerced_status = _coerce_homepage_status(status)
+        if coerced_status is not None:
+            candidate["homepage_status"] = coerced_status
+
+    if error is not None:
+        candidate["homepage_error"] = _truncate_error(str(error))
+
+    if filtered_url is not None:
+        candidate["homepage_filtered_url"] = str(filtered_url).strip()
+
+
 def extract_homepage(html_content: str) -> str | None:
     """Extract homepage URL from HTML. Returns None on error or not found."""
 
@@ -300,6 +528,71 @@ def _discover_frame_urls(html_content: str, base_url: str) -> list[str]:
     return frame_urls
 
 
+def _crawl_frames_for_metadata(
+    root_html: str,
+    root_url: str,
+    *,
+    session: requests.Session,
+    headers: dict[str, str],
+    timeout: float,
+    max_frames: int,
+    max_depth: int,
+    max_bytes: int,
+    logger,
+) -> dict[str, Any]:
+    if max_frames <= 0 or max_depth <= 0:
+        return {}
+
+    aggregated: dict[str, Any] = {}
+    visited: set[str] = set()
+    queue: deque[tuple[str, str, int]] = deque([(root_html, root_url, 0)])
+    fetched = 0
+
+    while queue and fetched < max_frames:
+        html, base_url, depth = queue.popleft()
+        if depth >= max_depth:
+            continue
+        for frame_url in _discover_frame_urls(html, base_url):
+            if frame_url in visited:
+                continue
+            visited.add(frame_url)
+            if fetched >= max_frames:
+                break
+            try:
+                response = session.get(frame_url, timeout=timeout, headers=headers)
+                fetched += 1
+                if response.status_code >= 400:
+                    logger.warning(
+                        "SCRAPE frame %s failed with HTTP %s",
+                        frame_url,
+                        response.status_code,
+                    )
+                    continue
+                frame_html = _extract_html(response, max_bytes=max_bytes)
+            except ContentTooLargeError as exc:
+                logger.warning("SCRAPE frame %s skipped: %s", frame_url, exc)
+                continue
+            except NonHtmlContentError as exc:
+                logger.warning("SCRAPE frame %s skipped: %s", frame_url, exc)
+                continue
+            except Exception as exc:  # pragma: no cover - network specific failures
+                logger.warning("SCRAPE frame fetch failed for %s: %s", frame_url, exc)
+                continue
+
+            frame_meta = extract_metadata(frame_html, frame_url)
+            if frame_meta:
+                aggregated = (
+                    _merge_metadata(aggregated, frame_meta)
+                    if aggregated
+                    else dict(frame_meta)
+                )
+
+            if depth + 1 < max_depth:
+                queue.append((frame_html, frame_url, depth + 1))
+
+    return aggregated
+
+
 def _normalize_doc_urls(value: Any) -> list[str]:
     urls: list[str] = []
     if isinstance(value, list):
@@ -356,6 +649,7 @@ def scrape_homepage_metadata(
     session: requests.Session | None = None,
 ) -> None:
     """Fetch homepage HTML and enrich candidate with documentation/repository links."""
+    normalize_candidate_homepage(candidate)
     cfg = config or {}
     homepage_candidates = _candidate_homepage_urls(candidate)
     if not homepage_candidates:
@@ -364,7 +658,11 @@ def scrape_homepage_metadata(
     homepage = homepage_candidates[0]
     if is_probable_publication_url(homepage):
         alternative = next(
-            (url for url in homepage_candidates if not is_probable_publication_url(url)),
+            (
+                url
+                for url in homepage_candidates
+                if not is_probable_publication_url(url)
+            ),
             None,
         )
         if alternative:
@@ -382,50 +680,76 @@ def scrape_homepage_metadata(
 
     timeout = cfg.get("timeout", 8)
     headers = {"User-Agent": cfg.get("user_agent", DEFAULT_USER_AGENT)}
+    max_bytes = int(cfg.get("max_bytes", DEFAULT_MAX_BYTES))
+    if max_bytes <= 0:
+        max_bytes = DEFAULT_MAX_BYTES
+    max_frames = int(cfg.get("max_frames", DEFAULT_MAX_FRAME_FETCHES))
+    if max_frames < 0:
+        max_frames = 0
+    max_frame_depth = int(cfg.get("max_frame_depth", DEFAULT_MAX_FRAME_DEPTH))
+    if max_frame_depth < 0:
+        max_frame_depth = 0
+
     sess = session or requests.Session()
 
     try:
         response = sess.get(homepage, timeout=timeout, headers=headers)
-        candidate["homepage_status"] = response.status_code
-        if response.status_code >= 400:
-            candidate["homepage_error"] = f"HTTP {response.status_code}"
-            return
-        html = response.text
-        candidate.pop("homepage_error", None)
     except (
         Exception
     ) as exc:  # pragma: no cover - network failures are environment-specific
-        candidate["homepage_status"] = None
-        candidate["homepage_error"] = str(exc)
+        status_label, message = _classify_homepage_exception(exc)
+        candidate["homepage_status"] = status_label
+        candidate["homepage_error"] = message or status_label
+        candidate["homepage_scraped"] = False
         logger.warning("SCRAPE failed for %s: %s", homepage, exc)
         return
 
+    candidate["homepage_status"] = response.status_code
+    if response.status_code >= 400:
+        candidate["homepage_error"] = f"HTTP {response.status_code}"
+        candidate["homepage_scraped"] = False
+        return
+
+    try:
+        html = _extract_html(response, max_bytes=max_bytes)
+    except ContentTooLargeError as exc:
+        candidate["homepage_status"] = "content_too_large"
+        candidate["homepage_error"] = _truncate_error(str(exc))
+        candidate["homepage_scraped"] = False
+        logger.warning("SCRAPE skipped %s: %s", homepage, exc)
+        return
+    except NonHtmlContentError as exc:
+        candidate["homepage_status"] = "non_html_content"
+        candidate["homepage_error"] = _truncate_error(str(exc))
+        candidate["homepage_scraped"] = False
+        logger.warning("SCRAPE skipped %s: %s", homepage, exc)
+        return
+
+    candidate.pop("homepage_error", None)
+
     meta = extract_metadata(html, homepage)
 
-    frame_urls = _discover_frame_urls(html, homepage)
-    max_frames = int(cfg.get("max_frames", 3))
-    for frame_url in islice((u for u in frame_urls if u), max_frames):
-        try:
-            frame_response = sess.get(frame_url, timeout=timeout, headers=headers)
-            if frame_response.status_code >= 400:
-                logger.warning(
-                    "SCRAPE frame %s failed with HTTP %s",
-                    frame_url,
-                    frame_response.status_code,
-                )
-                continue
-            frame_meta = extract_metadata(frame_response.text, frame_url)
-            if frame_meta:
-                meta = _merge_metadata(meta, frame_meta)
-        except Exception as exc:  # pragma: no cover - network specific
-            logger.warning("SCRAPE frame fetch failed for %s: %s", frame_url, exc)
-    docs = meta.get("documentation", [])
+    frame_meta = _crawl_frames_for_metadata(
+        html,
+        homepage,
+        session=sess,
+        headers=headers,
+        timeout=timeout,
+        max_frames=max_frames,
+        max_depth=max_frame_depth,
+        max_bytes=max_bytes,
+        logger=logger,
+    )
+    if frame_meta:
+        meta = _merge_metadata(meta, frame_meta) if meta else frame_meta
+
+    docs = meta.get("documentation", []) if meta else []
     if docs:
         _merge_documentation(candidate, docs)
-    repo = meta.get("repository")
+    repo = meta.get("repository") if meta else None
     if repo and not candidate.get("repository"):
         candidate["repository"] = repo
-    keywords = meta.get("documentation_keywords")
+    keywords = meta.get("documentation_keywords") if meta else None
     if keywords:
         candidate["documentation_keywords"] = keywords
     else:

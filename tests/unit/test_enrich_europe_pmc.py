@@ -1,4 +1,10 @@
+from __future__ import annotations
+
 import logging
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
 
 from biotoolsllmannotate.enrich.europe_pmc import (
     enrich_candidates_with_europe_pmc,
@@ -7,20 +13,31 @@ from biotoolsllmannotate.enrich.europe_pmc import (
 
 
 class DummyResponse:
-    def __init__(self, *, json_data=None, text="", status=200):
+    """Minimal response object for faking requests.get."""
+
+    def __init__(
+        self,
+        *,
+        json_data: dict[str, Any] | None = None,
+        text: str = "",
+        status: int = 200,
+    ) -> None:
         self._json = json_data
         self.text = text
         self.status_code = status
 
-    def json(self):
+    def json(self) -> dict[str, Any] | None:
+        """Return parsed JSON payload."""
         return self._json
 
-    def raise_for_status(self):
+    def raise_for_status(self) -> None:
+        """Raise runtime error for HTTP failures."""
         if self.status_code >= 400:
             raise RuntimeError("HTTP error")
 
 
-def test_enrich_adds_abstract(monkeypatch):
+def test_enrich_adds_abstract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Abstract text is attached to candidate metadata."""
     search_payload = {
         "resultList": {
             "result": [
@@ -34,9 +51,11 @@ def test_enrich_adds_abstract(monkeypatch):
         }
     }
 
-    responses = iter([DummyResponse(json_data=search_payload)])
+    responses: Iterator[DummyResponse] = iter([DummyResponse(json_data=search_payload)])
 
-    def fake_get(url, params=None, timeout=None):
+    def fake_get(
+        url: str, params: dict[str, Any] | None = None, timeout: float | None = None
+    ) -> DummyResponse:
         return next(responses)
 
     monkeypatch.setattr("biotoolsllmannotate.enrich.europe_pmc.requests.get", fake_get)
@@ -63,7 +82,10 @@ def test_enrich_adds_abstract(monkeypatch):
     reset_europe_pmc_cache()
 
 
-def test_enrich_uses_publication_ids_fallback(monkeypatch):
+def test_enrich_uses_publication_ids_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback to existing publication IDs when no direct match."""
     search_payload = {
         "resultList": {
             "result": [
@@ -76,9 +98,11 @@ def test_enrich_uses_publication_ids_fallback(monkeypatch):
         }
     }
 
-    responses = iter([DummyResponse(json_data=search_payload)])
+    responses: Iterator[DummyResponse] = iter([DummyResponse(json_data=search_payload)])
 
-    def fake_get(url, params=None, timeout=None):
+    def fake_get(
+        url: str, params: dict[str, Any] | None = None, timeout: float | None = None
+    ) -> DummyResponse:
         return next(responses)
 
     monkeypatch.setattr("biotoolsllmannotate.enrich.europe_pmc.requests.get", fake_get)
@@ -109,7 +133,10 @@ def test_enrich_uses_publication_ids_fallback(monkeypatch):
     reset_europe_pmc_cache()
 
 
-def test_enrich_adds_full_text_when_available(monkeypatch):
+def test_enrich_adds_full_text_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full text content is fetched and attached when allowed."""
     search_payload = {
         "resultList": {
             "result": [
@@ -130,14 +157,16 @@ def test_enrich_adds_full_text_when_available(monkeypatch):
         "<article><body><p>This is the full text content.</p></body></article>"
     )
 
-    responses = iter(
+    responses: Iterator[DummyResponse] = iter(
         [
             DummyResponse(json_data=search_payload),
             DummyResponse(text=fulltext_xml),
         ]
     )
 
-    def fake_get(url, params=None, timeout=None):
+    def fake_get(
+        url: str, params: dict[str, Any] | None = None, timeout: float | None = None
+    ) -> DummyResponse:
         return next(responses)
 
     monkeypatch.setattr("biotoolsllmannotate.enrich.europe_pmc.requests.get", fake_get)
@@ -167,7 +196,10 @@ def test_enrich_adds_full_text_when_available(monkeypatch):
     reset_europe_pmc_cache()
 
 
-def test_enrich_logs_homepage_summary(monkeypatch, caplog):
+def test_enrich_logs_homepage_summary(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log summary includes homepage, docs, and repo information."""
     search_payload = {
         "resultList": {
             "result": [
@@ -180,9 +212,11 @@ def test_enrich_logs_homepage_summary(monkeypatch, caplog):
         }
     }
 
-    responses = iter([DummyResponse(json_data=search_payload)])
+    responses: Iterator[DummyResponse] = iter([DummyResponse(json_data=search_payload)])
 
-    def fake_get(url, params=None, timeout=None):
+    def fake_get(
+        url: str, params: dict[str, Any] | None = None, timeout: float | None = None
+    ) -> DummyResponse:
         return next(responses)
 
     monkeypatch.setattr("biotoolsllmannotate.enrich.europe_pmc.requests.get", fake_get)

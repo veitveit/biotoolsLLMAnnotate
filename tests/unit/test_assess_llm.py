@@ -1,6 +1,14 @@
+import os
+import sys
+
 import pytest
 
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src"))
+)
+
 from biotoolsllmannotate.assess.scorer import Scorer, clamp_score
+from biotoolsllmannotate.enrich import normalize_candidate_homepage
 
 
 class StubClient:
@@ -26,6 +34,7 @@ class StubClient:
             },
             "concise_description": "Concise summary.",
             "rationale": "test",
+            "confidence_score": 1.0,
         }
 
 
@@ -56,6 +65,7 @@ def test_score_candidate_clamps_and_returns_rationale():
     assert isinstance(result.get("rationale"), str) and result["rationale"]
     assert result["concise_description"] == "Concise summary."
     assert result["origin_types"] == ["title", "description"]
+    assert result["confidence_score"] == 1.0
 
 
 class SubscoreClient:
@@ -80,6 +90,7 @@ class SubscoreClient:
             },
             "concise_description": "Provided summary.",
             "rationale": "Provided rationale.",
+            "confidence_score": 0.75,
         }
 
 
@@ -106,6 +117,7 @@ def test_score_candidate_averages_subscores():
         "B4": 0.0,
         "B5": 0.0,
     }
+    assert result["confidence_score"] == pytest.approx(0.75)
 
 
 class RetryClient:
@@ -131,6 +143,7 @@ class RetryClient:
                 },
                 "concise_description": "",
                 "rationale": "",
+                "confidence_score": 0.2,
             }
         return {
             "tool_name": "Retry Tool",
@@ -146,6 +159,7 @@ class RetryClient:
             },
             "concise_description": "Valid summary.",
             "rationale": "Valid rationale.",
+            "confidence_score": 0.9,
         }
 
 
@@ -182,6 +196,7 @@ class PublicationHomepageClient:
             },
             "concise_description": "Desc.",
             "rationale": "Rat.",
+            "confidence_score": 0.8,
         }
 
 
@@ -240,7 +255,10 @@ def test_build_prompt_fields():
     assert "rationale" in prompt
     assert "`bio_subscores`" in prompt
     assert "`documentation_subscores`" in prompt
+    assert "Confidence calibration guidelines" in prompt
+    assert "Do not default to 0.9" in prompt
     assert "Do NOT compute aggregate scores" in prompt
+    assert "confidence_score" in prompt
     assert "Do not output any value outside [0.0, 1.0]" in prompt
     assert "Always emit every field in the output JSON" in prompt
     assert "Output: respond ONLY with a single JSON object" in prompt
@@ -256,3 +274,17 @@ def test_build_prompt_fields():
         "publication_full_text",
         "publication_ids",
     ]
+
+
+def test_build_prompt_includes_homepage_status_from_pub2tools_metadata():
+    candidate = {
+        "title": "BrokenTool",
+        "homepage": {"url": "https://broken.example", "status": "404"},
+        "homepageError": "HTTP 404",
+    }
+    normalize_candidate_homepage(candidate)
+    scorer = Scorer()
+    prompt = scorer._build_prompt(candidate)
+    assert "Homepage: https://broken.example" in prompt
+    assert "Homepage status: 404" in prompt
+    assert "Homepage error: HTTP 404" in prompt

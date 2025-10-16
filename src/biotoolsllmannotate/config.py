@@ -31,6 +31,7 @@ DEFAULT_CONFIG_YAML = {
     },
     "pipeline": {
         "input_path": None,
+        "registry_path": None,
         "payload_version": __version__,
         "resume_from_enriched": False,
         "from_date": "7d",
@@ -116,6 +117,13 @@ Tags listed above are likewise extracted hints from the same external sources; c
 Normalize publication identifiers to prefixes: DOI:..., PMID:..., PMCID:... and remove duplicates (case-insensitive).
 For any subcriterion scored 0 due to missing evidence, mention "insufficient evidence: <item>" in the rationale.
 Record each bio subcriterion as numbers {{0,0.5,1}} in `bio_subscores` and each documentation subcriterion as numbers {{0,0.5,1}} in `documentation_subscores`.
+Provide `confidence_score` as a number between 0 and 1 summarizing how certain you are about the overall assessment (higher means more confident in the decision).
+Confidence calibration guidelines (adjust intermediate values as needed):
+- 0.9–1.0 only when every applicable subcriterion is fully satisfied with explicit evidence cited from multiple sources (homepage, documentation, repository, publications).
+- 0.6–0.8 when most evidence is strong but one or two subcriteria rely on weaker hints or inferred signals; call out the weaker areas in the rationale.
+- 0.3–0.5 when evidence is mixed, incomplete, or primarily keyword-level with limited direct verification.
+- 0.0–0.2 when information is insufficient, conflicting, or lacks primary sources—explicitly note "insufficient evidence" items in the rationale.
+Do not default to 0.9; calibrate confidence to reflect the overall strength and completeness of the cited evidence.
 Do NOT compute aggregate scores; only fill the provided fields.
 Do not output any value outside [0.0, 1.0].
 Always emit every field in the output JSON exactly once.
@@ -133,6 +141,7 @@ Output: respond ONLY with a single JSON object shaped as:
 "publication_ids": ["DOI:...", "PMID:...", "PMCID:..."],
 "bio_subscores": {{"A1": <0|0.5|1>, "A2": <0|0.5|1>, "A3": <0|0.5|1>, "A4": <0|0.5|1>, "A5": <0|0.5|1>}},
 "documentation_subscores": {{"B1": <0|0.5|1>, "B2": <0|0.5|1>, "B3": <0|0.5|1>, "B4": <0|0.5|1>, "B5": <0|0.5|1>}},
+"confidence_score": <0–1 numeric confidence>,
 "concise_description": "<1–2 sentence rewritten summary>",
 "rationale": "<2–5 sentences citing specific evidence for both score groups; for each claim indicate the source as one of: homepage, documentation, repository, abstract, full_text, tags; explicitly name missing items as 'insufficient evidence: ...'>>"
 }}""",

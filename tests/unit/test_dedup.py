@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import sys
 
@@ -7,7 +9,8 @@ sys.path.insert(
 from biotoolsllmannotate.ingest.dedup import deduplicate_candidates
 
 
-def test_deduplicate_candidates_basic():
+def test_deduplicate_candidates_basic() -> None:
+    """Deduplicate candidates by normalized title and homepage."""
     candidates = [
         {"title": "GeneAnnotator", "homepage": "https://ex.org/a"},
         {"title": "GeneAnnotator", "homepage": "https://ex.org/a"},

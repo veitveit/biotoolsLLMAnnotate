@@ -1,24 +1,49 @@
+from __future__ import annotations
+
 import csv
 import gzip
 import json
 import os
+import sys
 import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src"))
+)
+
+import biotoolsllmannotate.assess.scorer as scorer_module
+import biotoolsllmannotate.cli.run as run_module
+from biotoolsllmannotate.cli.run import execute_run, write_report_csv
+from biotoolsllmannotate.enrich import is_probable_publication_url
+from biotoolsllmannotate.version import __version__
 
 
 class DummyScorer:
-    def __init__(self, model=None):
+    """Deterministic scorer used to stub LLM scoring calls."""
+
+    def __init__(self, model: str | None = None) -> None:
         self.model = model
 
-    def score_candidate(self, candidate):
+    def score_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        """Return fixed scoring payload for the supplied candidate."""
         tool_name = candidate.get("title") or candidate.get("name") or ""
-        homepage = candidate.get("homepage") or next(
-            (
-                str(u)
-                for u in (candidate.get("urls") or [])
-                if str(u).startswith("http")
-            ),
-            "",
-        )
+        homepage = ""
+        raw_homepage = str(candidate.get("homepage") or "").strip()
+        if raw_homepage and not is_probable_publication_url(raw_homepage):
+            homepage = raw_homepage
+        else:
+            for raw in candidate.get("urls") or []:
+                url = str(raw).strip()
+                if not (url.startswith("http://") or url.startswith("https://")):
+                    continue
+                if is_probable_publication_url(url):
+                    continue
+                homepage = url
+                break
         publication_ids = candidate.get("publication_ids", [])
         return {
             "tool_name": tool_name,
@@ -46,19 +71,22 @@ class DummyScorer:
             "origin_types": [
                 key for key in ["title", "description"] if candidate.get(key)
             ],
+            "confidence_score": 0.9,
         }
 
 
-def test_write_report_csv(tmp_path):
-    from biotoolsllmannotate.cli.run import write_report_csv
-
+def test_write_report_csv(tmp_path: Path) -> None:
+    """Write a CSV report with flattened scoring columns."""
     rows = [
         {
             "id": "tool-1",
             "title": "Tool One",
             "homepage": "https://example.org",
+            "homepage_status": 404,
+            "homepage_error": "HTTP 404",
             "publication_ids": ["pmid:12345"],
             "include": True,
+            "in_biotools_name": True,
             "in_biotools": True,
             "scores": {
                 "bio_score": 0.9,
@@ -82,6 +110,7 @@ def test_write_report_csv(tmp_path):
                 "rationale": "Strong bioinformatics focus",
                 "model": "llama3.2",
                 "origin_types": ["title", "description"],
+                "confidence_score": 0.9,
             },
         }
     ]
@@ -102,19 +131,34 @@ def test_write_report_csv(tmp_path):
     assert row["bio_A5"] == "0.5"
     assert row["documentation_score"] == "0.8"
     assert row["doc_B4"] == "0.5"
+    assert row["confidence_score"] == "0.9"
     assert row["concise_description"] == "Short summary."
     assert row["tool_name"] == "Tool One"
     assert row["origin_types"] == "title, description"
     assert row["publication_ids"] == "pmid:12345"
+    assert row["in_biotools_name"] == "True"
     assert row["in_biotools"] == "True"
+    assert row["homepage_status"] == "404"
+    assert row["homepage_error"] == "HTTP 404"
 
 
-def test_execute_run_emits_csv_with_identifiers(tmp_path, monkeypatch):
-    from biotoolsllmannotate.cli.run import execute_run
-    import biotoolsllmannotate.assess.scorer as scorer_module
-
+def test_execute_run_emits_csv_with_identifiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Execute run produces CSV with identifier columns populated."""
     monkeypatch.setattr(
         scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
+    )
+    monkeypatch.setattr(
+        run_module,
+        "scrape_homepage_metadata",
+        lambda candidate, config=None, logger=None: candidate.update(
+            {
+                "homepage_status": 200,
+                "homepage_error": None,
+                "homepage_scraped": True,
+            }
+        ),
     )
 
     candidates = [
@@ -145,9 +189,9 @@ def test_execute_run_emits_csv_with_identifiers(tmp_path, monkeypatch):
     )
 
     out_dir = tmp_path / "out"
-    time_period_dirs = list(out_dir.glob("range_*"))
-    assert len(time_period_dirs) == 1
-    report_path = time_period_dirs[0] / "reports" / "assessment.jsonl"
+    run_dir = out_dir / "custom_tool_set"
+    assert run_dir.exists()
+    report_path = run_dir / "reports" / "assessment.jsonl"
     csv_path = report_path.with_suffix(".csv")
     with csv_path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -159,14 +203,17 @@ def test_execute_run_emits_csv_with_identifiers(tmp_path, monkeypatch):
     assert row["title"] == "Example Tool"
     assert row["homepage"] == "https://example.org"
     assert row["tool_name"] == "Example Tool"
+    assert row["in_biotools_name"] == ""
     assert row["in_biotools"] == ""
+    assert row["confidence_score"] == "0.9"
+    assert "homepage_status" in row
+    assert "homepage_error" in row
 
 
-def test_execute_run_marks_existing_registry(tmp_path, monkeypatch):
-    from biotoolsllmannotate.cli.run import execute_run
-    import biotoolsllmannotate.assess.scorer as scorer_module
-    from biotoolsllmannotate.config import DEFAULT_CONFIG_YAML
-
+def test_execute_run_marks_existing_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing registry entries are marked accordingly in output."""
     monkeypatch.setattr(
         scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
     )
@@ -174,7 +221,9 @@ def test_execute_run_marks_existing_registry(tmp_path, monkeypatch):
     input_dir = tmp_path / "input"
     input_dir.mkdir()
 
-    registry_path = input_dir / "biotools.json"
+    registry_dir = tmp_path / "registry"
+    registry_dir.mkdir()
+    registry_path = registry_dir / "biotools.json"
     registry_path.write_text(
         json.dumps(
             [
@@ -206,15 +255,16 @@ def test_execute_run_marks_existing_registry(tmp_path, monkeypatch):
         dry_run=True,
         concurrency=1,
         input_path=str(input_path),
+        registry_path=str(registry_path),
         offline=True,
         show_progress=False,
         output_root=tmp_path / "out",
     )
 
     out_dir = tmp_path / "out"
-    time_period_dirs = list(out_dir.glob("range_*"))
-    assert len(time_period_dirs) == 1
-    report_path = time_period_dirs[0] / "reports" / "assessment.jsonl"
+    run_dir = out_dir / "custom_tool_set"
+    assert run_dir.exists()
+    report_path = run_dir / "reports" / "assessment.jsonl"
     csv_path = report_path.with_suffix(".csv")
     with csv_path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -223,14 +273,208 @@ def test_execute_run_marks_existing_registry(tmp_path, monkeypatch):
     assert len(data) == 1
     row = data[0]
     assert row["in_biotools"] == "True"
+    assert row["in_biotools_name"] == "True"
+    assert row["confidence_score"] == "0.6"
+    assert "homepage_status" in row
+    assert "homepage_error" in row
 
 
-def test_execute_run_writes_updated_entries_file(tmp_path, monkeypatch):
-    from biotoolsllmannotate.cli.run import execute_run
-    import biotoolsllmannotate.assess.scorer as scorer_module
-
+def test_execute_run_filters_publication_homepage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pipeline drops publication-style homepages when no alternative exists."""
     monkeypatch.setattr(
         scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
+    )
+
+    candidates = [
+        {
+            "tool_id": "pubmed-1",
+            "title": "PubMed Tool",
+            "homepage": "https://pubmed.ncbi.nlm.nih.gov/123456/",
+            "urls": [
+                "https://pubmed.ncbi.nlm.nih.gov/123456/",
+                "https://link.springer.com/article/10.1000/example",
+            ],
+            "description": "Publication-first candidate",
+        }
+    ]
+
+    input_path = tmp_path / "candidates.json"
+    input_path.write_text(json.dumps(candidates), encoding="utf-8")
+
+    execute_run(
+        from_date="7d",
+        to_date=None,
+        min_bio_score=0.6,
+        min_doc_score=0.6,
+        limit=None,
+        dry_run=True,
+        concurrency=1,
+        input_path=str(input_path),
+        offline=False,
+        show_progress=False,
+        output_root=tmp_path / "out",
+    )
+
+    out_dir = tmp_path / "out"
+    run_dir = out_dir / "custom_tool_set"
+    assert run_dir.exists()
+    report_path = run_dir / "reports" / "assessment.jsonl"
+    csv_path = report_path.with_suffix(".csv")
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        data = list(reader)
+
+    assert len(data) == 1
+    row = data[0]
+    assert row["homepage"] == ""
+    assert row["include"] == "False"
+
+
+def test_execute_run_publication_only_zero_scores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publication-only candidates bypass LLM and receive rule-based zero scores."""
+
+    class FailScorer:
+        client = None
+
+        def __init__(
+            self, model: str | None = None, config: dict[str, Any] | None = None
+        ) -> None:
+            self.model = model
+            self.config = config
+
+        def score_candidate(
+            self, candidate: dict[str, Any]
+        ) -> dict[str, Any]:  # pragma: no cover - should not run
+            raise AssertionError(
+                "LLM scorer should not run for publication-only candidates"
+            )
+
+    monkeypatch.setattr(
+        scorer_module,
+        "Scorer",
+        lambda model=None, config=None: FailScorer(model, config),
+    )
+
+    candidates = [
+        {
+            "tool_id": "pubmed-2",
+            "title": "PubMed Only Tool",
+            "homepage": "https://pubmed.ncbi.nlm.nih.gov/987654/",
+            "urls": [
+                "https://pubmed.ncbi.nlm.nih.gov/987654/",
+                "https://doi.org/10.1000/example",
+            ],
+            "publication": [{"pmid": "987654"}],
+        }
+    ]
+
+    input_path = tmp_path / "candidates.json"
+    input_path.write_text(json.dumps(candidates), encoding="utf-8")
+
+    execute_run(
+        from_date="7d",
+        to_date=None,
+        min_bio_score=0.6,
+        min_doc_score=0.6,
+        limit=None,
+        dry_run=True,
+        model="llama3.2",
+        concurrency=1,
+        input_path=str(input_path),
+        offline=False,
+        show_progress=False,
+        output_root=tmp_path / "out",
+    )
+
+    out_dir = tmp_path / "out"
+    run_dir = out_dir / "custom_tool_set"
+    assert run_dir.exists()
+    report_path = run_dir / "reports" / "assessment.jsonl"
+    lines = report_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    decision = json.loads(lines[0])
+
+    assert decision["homepage"] == ""
+    assert decision["include"] is False
+    assert decision["scores"]["model"] == "rule:no-homepage"
+    assert decision["scores"]["bio_score"] == 0.0
+    assert decision["scores"]["documentation_score"] == 0.0
+    assert decision["scores"]["model_params"]["reason"] == "publication_url"
+    assert decision["scores"]["publication_ids"] == ["pmid:987654"]
+    assert decision.get("in_biotools_name") is None
+
+
+def test_execute_run_payload_strips_null_fields(tmp_path: Path) -> None:
+    """Payload JSON excludes any fields whose value was null."""
+
+    candidates = [
+        {
+            "tool_id": "null-tags",
+            "name": "Null Tags Tool",
+            "urls": [
+                "https://nulltags.example.org",
+                "https://docs.nulltags.example.org",
+            ],
+            "description": "Tool with sparse tags",
+            "tags": ["genomics", None, ""],
+        }
+    ]
+    input_path = tmp_path / "candidates.json"
+    input_path.write_text(json.dumps(candidates), encoding="utf-8")
+
+    execute_run(
+        from_date="7d",
+        to_date=None,
+        min_bio_score=0.0,
+        min_doc_score=0.0,
+        dry_run=False,
+        concurrency=1,
+        input_path=str(input_path),
+        offline=True,
+        show_progress=False,
+        output_root=tmp_path / "out",
+    )
+
+    out_dir = tmp_path / "out"
+    run_dir = out_dir / "custom_tool_set"
+    assert run_dir.exists()
+    payload_path = run_dir / "exports" / "biotools_payload.json"
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+
+    def _contains_none(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, dict):
+            return any(_contains_none(v) for v in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(_contains_none(item) for item in value)
+        return False
+
+    assert isinstance(payload, list) and payload
+    assert not _contains_none(payload)
+
+
+def test_execute_run_writes_updated_entries_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Execute run writes refreshed entries JSON files."""
+    monkeypatch.setattr(
+        scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
+    )
+    monkeypatch.setattr(
+        run_module,
+        "scrape_homepage_metadata",
+        lambda candidate, config=None, logger=None: candidate.update(
+            {
+                "homepage_status": 200,
+                "homepage_error": None,
+                "homepage_scraped": True,
+            }
+        ),
     )
 
     candidates = [
@@ -262,17 +506,14 @@ def test_execute_run_writes_updated_entries_file(tmp_path, monkeypatch):
     )
 
     out_dir = tmp_path / "out"
-    time_period_dirs = list(out_dir.glob("range_*"))
-    assert len(time_period_dirs) == 1
-    run_dir = time_period_dirs[0]
+    run_dir = out_dir / "custom_tool_set"
+    assert run_dir.exists()
     payload_path = run_dir / "exports" / "biotools_payload.json"
     updated_path = run_dir / "exports" / "biotools_entries.json"
 
     assert payload_path.exists()
     assert updated_path.exists()
     data = json.loads(updated_path.read_text())
-    from biotoolsllmannotate.version import __version__
-
     assert data["version"] == __version__
     assert len(data["entries"]) == 1
     entry = data["entries"][0]
@@ -282,9 +523,10 @@ def test_execute_run_writes_updated_entries_file(tmp_path, monkeypatch):
     assert entry.get("publication")
 
 
-def test_execute_run_logs_score_duration(tmp_path, capfd):
-    from biotoolsllmannotate.cli.run import execute_run
-
+def test_execute_run_logs_score_duration(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """Execute run logs timing metrics for scoring."""
     candidates = [
         {
             "title": "Timing Tool",
@@ -313,10 +555,10 @@ def test_execute_run_logs_score_duration(tmp_path, capfd):
     assert "score_elapsed_seconds" in captured.out
 
 
-def test_resume_from_enriched_cache(tmp_path, monkeypatch):
-    from biotoolsllmannotate.cli.run import execute_run
-    import biotoolsllmannotate.assess.scorer as scorer_module
-
+def test_resume_from_enriched_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume pipeline from enriched candidate cache."""
     monkeypatch.setattr(
         scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
     )
@@ -348,9 +590,8 @@ def test_resume_from_enriched_cache(tmp_path, monkeypatch):
         output_root=tmp_path / "out",
     )
     out_dir = tmp_path / "out"
-    time_period_dirs = list(out_dir.glob("range_*"))
-    assert len(time_period_dirs) == 1
-    run_dir = time_period_dirs[0]
+    run_dir = out_dir / "custom_tool_set"
+    assert run_dir.exists()
     cache_path = run_dir / "cache" / "enriched_candidates.json.gz"
     assert cache_path.exists()
 
@@ -374,10 +615,10 @@ def test_resume_from_enriched_cache(tmp_path, monkeypatch):
     assert payload_path.exists()
 
 
-def test_resume_from_pub2tools_export(tmp_path, monkeypatch):
-    from biotoolsllmannotate.cli.run import execute_run
-    import biotoolsllmannotate.assess.scorer as scorer_module
-
+def test_resume_from_pub2tools_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume pipeline using saved pub2tools export."""
     monkeypatch.setattr(
         scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
     )
@@ -424,10 +665,10 @@ def test_resume_from_pub2tools_export(tmp_path, monkeypatch):
     assert payload[0]["name"] == "Bioinformatics Resume Tool"
 
 
-def test_resume_from_pub2tools_ignores_other_ranges(tmp_path, monkeypatch):
-    from biotoolsllmannotate.cli.run import execute_run
-    import biotoolsllmannotate.assess.scorer as scorer_module
-
+def test_resume_from_pub2tools_ignores_other_ranges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume from pub2tools uses only matching date ranges."""
     monkeypatch.setattr(
         scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
     )
@@ -498,10 +739,8 @@ def test_resume_from_pub2tools_ignores_other_ranges(tmp_path, monkeypatch):
     assert payload[0]["name"] == "Target Candidate"
 
 
-def test_resume_from_scoring(tmp_path, monkeypatch):
-    from biotoolsllmannotate.cli.run import execute_run
-    import biotoolsllmannotate.assess.scorer as scorer_module
-
+def test_resume_from_scoring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resume pipeline from scoring artifacts."""
     monkeypatch.setattr(
         scorer_module, "Scorer", lambda model=None, config=None: DummyScorer(model)
     )
@@ -554,6 +793,7 @@ def test_resume_from_scoring(tmp_path, monkeypatch):
                     "B5": 0.5,
                 },
                 "concise_description": "Short summary.",
+                "confidence_score": 0.4,
             },
             "include": False,
         }

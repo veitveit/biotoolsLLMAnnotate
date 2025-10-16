@@ -50,9 +50,8 @@ def test_dual_threshold_filtering_affects_inclusion(tmp_path):
     )
 
     out_dir = tmp_path / "out"
-    time_period_dirs = list(out_dir.glob("range_*"))
-    assert len(time_period_dirs) == 1
-    run_dir = time_period_dirs[0]
+    run_dir = out_dir / "custom_tool_set"
+    assert run_dir.exists()
     payload_path = run_dir / "exports" / "biotools_payload.json"
     lo = json.loads(payload_path.read_text(encoding="utf-8"))
 

@@ -50,12 +50,13 @@ python -m biotoolsllmannotate --resume-from-enriched --resume-from-scoring --dry
 ```
 
 ## Configuration
-Configuration is YAML-driven. The CLI loads `config.yaml` from the project root by default and falls back to internal defaults when absent. All placeholders marked `__VERSION__` resolve to the installed package version at runtime. During each run the pipeline scans the Pub2Tools export folders (for example `pub2tools/to_biotools.json` or `pub2tools/biotools_entries.json`) and uses them to flag candidates already present in bio.tools—no manual registry path is required.
+Configuration is YAML-driven. The CLI loads `config.yaml` from the project root by default and falls back to internal defaults when absent. All placeholders marked `__VERSION__` resolve to the installed package version at runtime. During each run the pipeline scans the Pub2Tools export folders (for example `pub2tools/to_biotools.json` or `pub2tools/biotools_entries.json`) and uses them to flag candidates already present in bio.tools; you can also point to any standalone registry snapshot via `pipeline.registry_path` or `--registry` when you want to bypass Pub2Tools exports entirely.
 
 ### Core settings
 | Purpose | Config key | CLI flag | Notes |
 | --- | --- | --- | --- |
 | Input source | `pipeline.input_path` | `--input PATH` | Prefer a local JSON export instead of running Pub2Tools |
+| Registry snapshot | `pipeline.registry_path` | `--registry PATH` | Supply an external bio.tools JSON/JSONL snapshot for membership checks |
 | Date range | `pipeline.from_date`, `pipeline.to_date` | `--from-date`, `--to-date` | Accepts relative windows like `7d` or ISO dates |
 | Thresholds | `pipeline.min_bio_score`, `pipeline.min_documentation_score` | `--min-bio-score`, `--min-doc-score` | Set both via legacy `--min-score` if desired |
 | Offline mode | `pipeline.offline` | `--offline` | Disables homepage scraping and Europe PMC enrichment |
@@ -79,6 +80,9 @@ python -m biotoolsllmannotate --from-date 2024-01-01 --to-date 2024-03-31
 # Offline mode (no network scraping or Europe PMC requests)
 python -m biotoolsllmannotate --offline
 
+# Start from local candidates and separate registry snapshot
+python -m biotoolsllmannotate --input data/candidates.json --registry data/biotools_snapshot.json --offline
+
 # Limit the number of candidates processed
 python -m biotoolsllmannotate --limit 25
 
@@ -89,17 +93,26 @@ python -m biotoolsllmannotate --config myconfig.yaml
 Use `python -m biotoolsllmannotate --help` to explore all available flags, including concurrency settings, progress display, and resume options.
 
 ## Generated Outputs
-Each run writes artifacts to `out/<range_start>_to_<range_end>/...`:
+Each run writes artifacts to one of the following folders:
+
+- `out/<range_start>_to_<range_end>/...` when the pipeline gathers candidates from Pub2Tools.
+- `out/custom_tool_set/...` whenever you supply `--input` or set `BIOTOOLS_ANNOTATE_INPUT/JSON` (resume flags reuse the same directory).
+
+The selected folder contains:
 
 | Path | Description |
 | --- | --- |
 | `exports/biotools_payload.json` | biotoolsSchema-compliant payload ready for upload |
 | `exports/biotools_entries.json` | Full entries including enriched metadata |
 | `reports/assessment.jsonl` | Line-delimited scoring results (bio score, doc score, rationale) |
-| `reports/assessment.csv` | Spreadsheet-friendly summary of the JSONL file (includes an `in_biotools` column when Pub2Tools snapshots are present) |
+| `reports/assessment.csv` | Spreadsheet-friendly summary of the JSONL file (includes `in_biotools` and `confidence_score` columns when Pub2Tools snapshots are present) |
 | `cache/enriched_candidates.json.gz` | Cached candidates after enrichment for quick resumes |
 | `logs/ollama.log` | Append-only log of all LLM scoring prompts and responses |
 | `config.generated.yaml` or `<original-config>.yaml` | Snapshot of the configuration used for the run |
+
+### Confidence calibration
+
+The LLM now follows an explicit rubric when emitting the `confidence_score` field. Expect values near 0.9–1.0 only when every subcriterion is backed by clear evidence from multiple sources; mixed or inferred evidence should land around 0.3–0.8, and scarce/conflicting evidence should drop to 0.0–0.2. Review the prompt template (either in `config.yaml` or your custom config) for the full guidance and adjust it further if your use case calls for a different calibration.
 
 ## Resume & Caching
 - `--resume-from-pub2tools`: Reuse the latest `to_biotools.json` export for the active time range.

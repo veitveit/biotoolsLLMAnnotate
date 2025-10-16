@@ -27,9 +27,10 @@ biotools-annotate --write-default-config
 
 | Config key | CLI flag | Description |
 | --- | --- | --- |
-| `pipeline.input_path` | `--input` | Load candidates from an existing JSON export |
+| `pipeline.input_path` | `--input` | Load tool candidates from an existing JSON export |
+| `pipeline.registry_path` | `--registry` | Load bio.tools registry snapshot to check for existing entries |
 | `pipeline.from_date` / `pipeline.to_date` | `--from-date` / `--to-date` | Control date window for gathering candidates |
-| `pipeline.resume_from_enriched` | `--resume-from-enriched` | Reuse cached enriched candidates |
+| `pipeline.resume_from_enriched` | `--resume-from-enriched` | Reuse cached enriched tool candidates |
 | `pipeline.resume_from_pub2tools` | `--resume-from-pub2tools` | Reuse cached `to_biotools.json` export |
 | `pipeline.resume_from_scoring` | `--resume-from-scoring` | Reapply thresholds without rerunning scoring |
 | `pipeline.min_bio_score` | `--min-bio-score` | Minimum LLM bio score required |
@@ -97,15 +98,9 @@ biotools-annotate --write-default-config
   - **Custom command**: `"java -Xmx4g -jar /opt/pub2tools.jar"`
 - **Note**: If not set, the tool will auto-detect Pub2Tools CLI using environment variables and common installation paths
 
-#### `pub2tools.output_dir`
-- **Type**: String (path)
-- **Default**: `"out/pub2tools"`
-- **Description**: Directory for Pub2Tools output files
-- **Example**: `"data/pub2tools"`
-
 ### Pipeline Configuration
 
-> **Note:** All pipeline artifacts are written to a time-period folder (`out/<time-period>/…`) using fixed filenames. After each run the active configuration file (or a generated snapshot) is copied into that folder for record keeping.
+> **Note:** All pipeline artifacts are written to a dedicated folder using fixed filenames: either the time-period path (`out/<time-period>/…`) when Pub2Tools ingestion is active, or `out/custom_tool_set/...` when `pipeline.input_path`/`--input`/`BIOTOOLS_ANNOTATE_INPUT` is used (resume flags reuse the same directory). After each run the active configuration file (or a generated snapshot) is copied into that folder for record keeping.
 
 #### `pipeline.resume_from_enriched`
 - **Type**: Boolean
@@ -124,6 +119,14 @@ biotools-annotate --write-default-config
 - **Description**: Preferred input file (overrides Pub2Tools fetch)
 - **CLI equivalent**: `--input`
 - **Example**: `"data/candidates.json"`
+
+#### `pipeline.registry_path`
+- **Type**: String (path) or null
+- **Default**: `null`
+- **Description**: Explicit bio.tools registry snapshot used to flag existing entries. Accepts either a JSON file (list or object with `entries`/`list`) or a directory containing files such as `biotools.json`.
+- **CLI equivalent**: `--registry`
+- **Example**: `"data/biotools_snapshot.json"`
+- **Notes**: When unset, the pipeline scans Pub2Tools export folders (current time-period cache and global cache). Use this option to supply a curated snapshot or to run the pipeline without Pub2Tools artifacts present.
 
 #### `pipeline.resume_from_pub2tools`
 - **Type**: Boolean

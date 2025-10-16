@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from biotoolsllmannotate.enrich import normalize_candidate_homepage
+
 _EDAM_FIELDS = ("topic", "data", "operation", "format")
 _EDAM_TERM_KEYS = ("term", "label", "name")
 
@@ -154,6 +156,7 @@ def load_from_env_file(path: Path) -> list[dict[str, Any]]:
         for raw in data if isinstance(data, list) else []:
             if isinstance(raw, dict):
                 merge_edam_tags(raw)
+                normalize_candidate_homepage(raw)
                 items.append(raw)
         if isinstance(data, dict):
             candidate_list = data.get("list")
@@ -161,6 +164,7 @@ def load_from_env_file(path: Path) -> list[dict[str, Any]]:
                 for raw in candidate_list:
                     if isinstance(raw, dict):
                         merge_edam_tags(raw)
+                        normalize_candidate_homepage(raw)
                         items.append(raw)
         return items
     except Exception:

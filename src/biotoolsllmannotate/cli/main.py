@@ -127,6 +127,11 @@ def _run_impl(
     input_path: str | None = typer.Option(
         None, "--input", help="Preferred input path (overrides Pub2Tools fetch)."
     ),
+    registry_path: str | None = typer.Option(
+        None,
+        "--registry",
+        help="Path to bio.tools registry JSON/CSV snapshot used for membership checks.",
+    ),
     offline: bool = typer.Option(
         False,
         "--offline",
@@ -223,13 +228,16 @@ def _run_impl(
         config_input = pipeline_cfg.get("input_path")
         if config_input:
             input_path = config_input
+    if registry_path is None:
+        config_registry = pipeline_cfg.get("registry_path")
+        if config_registry:
+            registry_path = config_registry
 
     if resume_from_pub2tools and input_path:
-        typer.echo(
-            "--resume-from-pub2tools cannot be used together with --input or pipeline.input_path",
-            err=True,
+        raise typer.BadParameter(
+            "cannot be used together with --input or pipeline.input_path",
+            param_hint="--resume-from-pub2tools",
         )
-        raise typer.Exit(code=2)
 
     # Determine score thresholds (CLI > legacy min-score > config > default)
     def _coerce_threshold(value, default):
@@ -290,6 +298,7 @@ def _run_impl(
             model=model,
             concurrency=concurrency,
             input_path=input_path,
+            registry_path=registry_path,
             offline=offline,
             edam_owl=edam_owl,
             idf=idf,
@@ -305,7 +314,6 @@ def _run_impl(
         )
     except Exception as e:
         import traceback
-        import typer
 
         typer.echo("\nERROR: Unhandled exception in pipeline:", err=True)
         typer.echo(str(e), err=True)

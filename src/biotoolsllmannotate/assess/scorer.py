@@ -10,15 +10,16 @@ from biotoolsllmannotate.enrich import is_probable_publication_url
 JSON_RESPONSE_SCHEMA = """{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": [
-    "tool_name",
-    "homepage",
-    "publication_ids",
-    "bio_subscores",
-    "documentation_subscores",
-    "concise_description",
-    "rationale"
-  ],
+    "required": [
+        "tool_name",
+        "homepage",
+        "publication_ids",
+        "bio_subscores",
+        "documentation_subscores",
+        "confidence_score",
+        "concise_description",
+        "rationale"
+    ],
   "additionalProperties": false,
   "properties": {
     "tool_name": {"type": "string"},
@@ -39,18 +40,23 @@ JSON_RESPONSE_SCHEMA = """{
       },
       "additionalProperties": {"type": "number"}
     },
-    "documentation_subscores": {
-      "type": "object",
-      "required": ["B1", "B2", "B3", "B4", "B5"],
-      "properties": {
-        "B1": {"type": "number"},
-        "B2": {"type": "number"},
-        "B3": {"type": "number"},
-        "B4": {"type": "number"},
-        "B5": {"type": "number"}
-      },
-      "additionalProperties": {"type": "number"}
-    },
+        "documentation_subscores": {
+            "type": "object",
+            "required": ["B1", "B2", "B3", "B4", "B5"],
+            "properties": {
+                "B1": {"type": "number"},
+                "B2": {"type": "number"},
+                "B3": {"type": "number"},
+                "B4": {"type": "number"},
+                "B5": {"type": "number"}
+            },
+            "additionalProperties": {"type": "number"}
+        },
+        "confidence_score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+        },
     "concise_description": {"type": "string"},
     "rationale": {"type": "string"}
   }
@@ -62,6 +68,7 @@ _EXPECTED_TOP_LEVEL_TYPES = {
     "publication_ids": list,
     "bio_subscores": Mapping,
     "documentation_subscores": Mapping,
+    "confidence_score": (int, float),
     "concise_description": str,
     "rationale": str,
 }
@@ -81,8 +88,12 @@ def _schema_validation_errors(response: Any) -> List[str]:
             continue
         value = response[key]
         if not isinstance(value, expected_type):
+            if isinstance(expected_type, tuple):
+                expected_name = ", ".join(t.__name__ for t in expected_type)
+            else:
+                expected_name = expected_type.__name__
             errors.append(
-                f"field '{key}' must be of type {expected_type.__name__}, got {type(value).__name__}"
+                f"field '{key}' must be of type {expected_name}, got {type(value).__name__}"
             )
 
     publication_ids = response.get("publication_ids")
@@ -125,6 +136,11 @@ def _schema_validation_errors(response: Any) -> List[str]:
             errors.append(
                 f"field '{text_field}' must be a string, got {type(value).__name__}"
             )
+
+    confidence_value = response.get("confidence_score")
+    if isinstance(confidence_value, (int, float)):
+        if confidence_value < 0 or confidence_value > 1:
+            errors.append("field 'confidence_score' must be between 0 and 1")
 
     return errors
 
@@ -349,9 +365,7 @@ class Scorer:
                     f"Unexpected response type: {type(raw_response).__name__}"
                 ]
                 if attempt == attempts - 1:
-                    raise ValueError(
-                        "LLM scoring returned an unexpected payload type"
-                    )
+                    raise ValueError("LLM scoring returned an unexpected payload type")
                 continue
 
             validation_errors = _schema_validation_errors(parsed_response)
@@ -408,6 +422,12 @@ class Scorer:
         if successful_attempts is not None:
             model_params["attempts"] = successful_attempts
 
+        confidence_raw = response.get("confidence_score")
+        confidence_value = _coerce_float(confidence_raw)
+        if confidence_value is None:
+            confidence_value = 0.0
+        confidence_score = clamp_score(confidence_value)
+
         result = {
             "tool_name": response.get("tool_name")
             or candidate.get("title")
@@ -421,6 +441,7 @@ class Scorer:
             "model": self.model,
             "model_params": model_params,
             "origin_types": origin_types,
+            "confidence_score": confidence_score,
         }
         result["bio_subscores"] = bio_breakdown or {}
         result["documentation_subscores"] = doc_breakdown or {}
@@ -470,6 +491,7 @@ Base every decision on the supplied material only.
 Normalize publication identifiers to prefixes: DOI:..., PMID:..., PMCID:... and remove duplicates (case-insensitive).
 For any subcriterion scored 0 due to missing evidence, mention "insufficient evidence: <item>" in the rationale.
 Record each bio subcriterion as numbers {{0,0.5,1}} in `bio_subscores` and each documentation subcriterion as numbers {{0,0.5,1}} in `documentation_subscores`.
+Provide `confidence_score` as a number between 0 and 1 summarizing your certainty in the assessment (higher means more confident).
 Do NOT compute aggregate scores; only fill the provided fields.
 Do not output any value outside [0.0, 1.0].
 Always emit every field in the output JSON exactly once.
@@ -487,6 +509,7 @@ Output: respond ONLY with a single JSON object shaped as:
 "publication_ids": ["DOI:...", "PMID:...", "PMCID:..."],
 "bio_subscores": {{"A1": <0|0.5|1>, "A2": <0|0.5|1>, "A3": <0|0.5|1>, "A4": <0|0.5|1>, "A5": <0|0.5|1>}},
 "documentation_subscores": {{"B1": <0|0.5|1>, "B2": <0|0.5|1>, "B3": <0|0.5|1>, "B4": <0|0.5|1>, "B5": <0|0.5|1>}},
+"confidence_score": <0–1 numeric confidence>,
 "concise_description": "<1–2 sentence rewritten summary>",
 "rationale": "<2–5 sentences citing specific evidence for both score groups; for each claim indicate the source as one of: homepage, documentation, repository, abstract, full_text, tags; explicitly name missing items as 'insufficient evidence: ...'>"
 }}"""
@@ -551,7 +574,9 @@ Output: respond ONLY with a single JSON object shaped as:
         )
         return prompt
 
-    def _augment_prompt_with_errors(self, base_prompt: str, errors: Sequence[str]) -> str:
+    def _augment_prompt_with_errors(
+        self, base_prompt: str, errors: Sequence[str]
+    ) -> str:
         bullet_list = "\n".join(f"- {error}" for error in errors)
         return (
             f"{base_prompt}\n\n"

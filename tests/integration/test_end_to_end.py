@@ -34,9 +34,8 @@ def test_end_to_end_on_fixture(tmp_path):
 
     assert proc.returncode == 0
     out_dir = tmp_path / "out"
-    time_period_dirs = list(out_dir.glob("range_*"))
-    assert len(time_period_dirs) == 1
-    run_dir = time_period_dirs[0]
+    run_dir = out_dir / "custom_tool_set"
+    assert run_dir.exists()
     payload = run_dir / "exports" / "biotools_payload.json"
     data = json.loads(payload.read_text(encoding="utf-8"))
     assert isinstance(data, list)

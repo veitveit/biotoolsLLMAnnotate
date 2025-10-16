@@ -1,10 +1,15 @@
+from __future__ import annotations
+
+from typing import Any
+
 import pytest
 import requests
 
 from biotoolsllmannotate.assess.ollama_client import OllamaClient, OllamaConnectionError
 
 
-def test_ollama_client_uses_retry_configuration():
+def test_ollama_client_uses_retry_configuration() -> None:
+    """Client honors retry configuration for adapters."""
     config = {
         "ollama": {
             "host": "http://example.invalid",
@@ -29,7 +34,8 @@ def test_ollama_client_uses_retry_configuration():
     assert https_adapter.max_retries.backoff_factor == pytest.approx(0.5)
 
 
-def test_generate_retries_connection_errors(monkeypatch):
+def test_generate_retries_connection_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Generate retries on connection errors and raises custom error."""
     config = {
         "ollama": {
             "host": "http://example.invalid",
@@ -45,7 +51,7 @@ def test_generate_retries_connection_errors(monkeypatch):
 
     calls = 0
 
-    def fake_post(*args, **kwargs):
+    def fake_post(*args: Any, **kwargs: Any) -> None:
         nonlocal calls
         calls += 1
         raise requests.exceptions.ConnectionError("boom")

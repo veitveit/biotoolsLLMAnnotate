@@ -5,6 +5,7 @@ src/biotoolsllmannotate/__init__.py
 src/biotoolsllmannotate/__main__.py
 src/biotoolsllmannotate/config.py
 src/biotoolsllmannotate/metrics.py
+src/biotoolsllmannotate/registry.py
 src/biotoolsllmannotate/validation.py
 src/biotoolsllmannotate/version.py
 src/biotoolsllmannotate.egg-info/PKG-INFO

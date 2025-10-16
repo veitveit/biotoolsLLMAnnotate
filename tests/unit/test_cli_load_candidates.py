@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -7,10 +9,15 @@ sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src"))
 )
 
-from biotoolsllmannotate.cli.run import _resolve_homepage, load_candidates
+from biotoolsllmannotate.cli.run import (
+    _resolve_homepage,
+    load_candidates,
+    primary_homepage,
+)
 
 
-def test_load_candidates_wrapped_list(tmp_path):
+def test_load_candidates_wrapped_list(tmp_path: Path) -> None:
+    """Load candidates from wrapped list export."""
     data = {"count": 1, "list": [{"id": "wrapped", "title": "Wrapped Tool"}]}
     path = Path(tmp_path) / "wrapped.json"
     path.write_text(json.dumps(data))
@@ -21,13 +28,15 @@ def test_load_candidates_wrapped_list(tmp_path):
     assert candidates[0]["id"] == "wrapped"
 
 
-def test_load_candidates_missing_file(tmp_path):
+def test_load_candidates_missing_file(tmp_path: Path) -> None:
+    """Missing file returns an empty candidate list."""
     missing_path = Path(tmp_path) / "missing.json"
     candidates = load_candidates(str(missing_path))
     assert candidates == []
 
 
-def test_load_candidates_array(tmp_path):
+def test_load_candidates_array(tmp_path: Path) -> None:
+    """Load candidates provided as an array payload."""
     data = [{"id": "array", "title": "Array Tool"}]
     path = Path(tmp_path) / "array.json"
     path.write_text(json.dumps(data))
@@ -38,7 +47,8 @@ def test_load_candidates_array(tmp_path):
     assert candidates[0]["id"] == "array"
 
 
-def test_load_candidates_merges_edam_tags(tmp_path):
+def test_load_candidates_merges_edam_tags(tmp_path: Path) -> None:
+    """Merge EDAM-derived tags onto existing candidate tags."""
     data = {
         "count": 1,
         "list": [
@@ -89,16 +99,15 @@ def test_load_candidates_merges_edam_tags(tmp_path):
     }
 
 
-def test_resolve_homepage_filters_publication_urls():
+def test_resolve_homepage_filters_publication_urls() -> None:
+    """Homepage resolver filters out publication-only URLs."""
     candidate = {
         "urls": [
             "https://www.ncbi.nlm.nih.gov/pubmed/?term=39745644",
             "https://example.org/tool",
         ]
     }
-    scores = {
-        "homepage": "https://www.ncbi.nlm.nih.gov/pubmed/?term=39745644"
-    }
+    scores = {"homepage": "https://www.ncbi.nlm.nih.gov/pubmed/?term=39745644"}
 
     homepage = _resolve_homepage(
         candidate,
@@ -124,3 +133,15 @@ def test_resolve_homepage_filters_publication_urls():
         "https://doi.org/10.1000/example",
     )
     assert homepage == ""
+
+
+def test_primary_homepage_skips_publication_urls() -> None:
+    """Primary homepage helper returns first non-publication URL."""
+    urls = [
+        "https://pubmed.ncbi.nlm.nih.gov/39745644/",
+        "https://example.org/tool",
+    ]
+    assert primary_homepage(urls) == "https://example.org/tool"
+
+    publication_only = ["https://doi.org/10.1000/example"]
+    assert primary_homepage(publication_only) is None

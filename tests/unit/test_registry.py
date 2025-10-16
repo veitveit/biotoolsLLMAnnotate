@@ -1,5 +1,10 @@
+from __future__ import annotations
+
 import json
 import logging
+from pathlib import Path
+
+import pytest
 
 from biotoolsllmannotate.registry import (
     BioToolsRegistry,
@@ -7,7 +12,8 @@ from biotoolsllmannotate.registry import (
 )
 
 
-def _write_registry(tmp_path, filename="biotools.json"):
+def _write_registry(tmp_path: Path, filename: str = "biotools.json") -> Path:
+    """Write a minimal registry snapshot into the temp directory."""
     dump_path = tmp_path / filename
     dump_path.write_text(
         json.dumps(
@@ -35,10 +41,14 @@ def _write_registry(tmp_path, filename="biotools.json"):
     return dump_path
 
 
-def test_registry_lookup_requires_name_and_homepage(tmp_path):
+def test_registry_lookup_and_name_presence(tmp_path: Path) -> None:
+    """Registry tracks name presence separately from homepage matches."""
     dump_path = _write_registry(tmp_path)
     registry = BioToolsRegistry.from_json(dump_path)
 
+    assert registry.contains_name("Example Tool") is True
+    assert registry.contains_name("exampletool") is True
+    assert registry.contains_name("missing tool") is False
     assert registry.contains("Example Tool", "https://example.org") is True
     assert registry.contains("exampletool", "http://example.org/") is True
     assert registry.contains("Example Tool", "https://other.example") is False
@@ -47,8 +57,13 @@ def test_registry_lookup_requires_name_and_homepage(tmp_path):
     assert registry.contains(None, "https://example.org") is False
     assert registry.contains("Example Tool", None) is False
 
+    registry.add_entry({"name": "NoHome Tool"})
+    assert registry.contains_name("NoHome Tool") is True
+    assert registry.contains("NoHome Tool", "https://nohome.example") is False
 
-def test_load_registry_from_pub2tools_directory(tmp_path):
+
+def test_load_registry_from_pub2tools_directory(tmp_path: Path) -> None:
+    """Loading from pub2tools directory yields registry instance."""
     snapshot_dir = tmp_path / "pub2tools"
     snapshot_dir.mkdir()
     _write_registry(snapshot_dir, "biotools_entries.json")
@@ -59,7 +74,10 @@ def test_load_registry_from_pub2tools_directory(tmp_path):
     assert registry.contains("Example Tool", "https://example.org")
 
 
-def test_load_registry_from_pub2tools_missing(tmp_path, caplog):
+def test_load_registry_from_pub2tools_missing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Missing snapshot directory logs a debug message."""
     logger = logging.getLogger("test.registry")
     with caplog.at_level("DEBUG"):
         registry = load_registry_from_pub2tools(tmp_path, logger=logger)

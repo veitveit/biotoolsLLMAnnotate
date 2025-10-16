@@ -4,6 +4,7 @@ import csv
 import gzip
 import json
 import os
+import re
 import shutil
 import sys
 from time import perf_counter
@@ -28,6 +29,7 @@ from biotoolsllmannotate.schema.models import BioToolsEntry
 from biotoolsllmannotate.registry import BioToolsRegistry, load_registry_from_pub2tools
 from biotoolsllmannotate.enrich import (
     is_probable_publication_url,
+    normalize_candidate_homepage,
     scrape_homepage_metadata,
 )
 from biotoolsllmannotate.ingest.pub2tools_fetcher import merge_edam_tags
@@ -126,6 +128,7 @@ def load_candidates(env_input: str | None) -> list[dict[str, Any]]:
         for raw in candidates:
             if isinstance(raw, dict):
                 merge_edam_tags(raw)
+                normalize_candidate_homepage(raw)
                 merged.append(raw)
         return merged
     except Exception:
@@ -159,9 +162,107 @@ def normalize_url(u: str) -> str:
 def primary_homepage(urls: Iterable[str]) -> str | None:
     for u in urls:
         nu = normalize_url(str(u))
-        if nu.startswith("http://") or nu.startswith("https://"):
-            return nu
+        if not (nu.startswith("http://") or nu.startswith("https://")):
+            continue
+        if is_probable_publication_url(nu):
+            continue
+        return nu
     return None
+
+
+def _resolve_scoring_homepage(candidate: dict[str, Any]) -> tuple[str, str | None]:
+    raw_homepage = str(candidate.get("homepage") or "").strip()
+    urls = [str(u).strip() for u in (candidate.get("urls") or [])]
+
+    if raw_homepage and not is_probable_publication_url(raw_homepage):
+        candidate["homepage"] = raw_homepage
+        return raw_homepage, None
+
+    alt_homepage = primary_homepage(urls) or ""
+    if alt_homepage:
+        candidate["homepage"] = alt_homepage
+        return alt_homepage, None
+
+    if raw_homepage:
+        candidate.pop("homepage", None)
+        return "", "publication_url"
+    if any(is_probable_publication_url(url) for url in urls):
+        candidate.pop("homepage", None)
+        return "", "publication_url"
+    candidate.pop("homepage", None)
+    return "", "missing_homepage"
+
+
+def _origin_types(candidate: dict[str, Any]) -> list[str]:
+    mapping = [
+        ("title", "title"),
+        ("description", "description"),
+        ("homepage", "homepage"),
+        ("documentation", "documentation"),
+        ("repository", "repository"),
+        ("tags", "tags"),
+        ("published_at", "publication"),
+        ("publication_abstract", "publication_abstract"),
+        ("publication_full_text", "publication_full_text"),
+        ("publication_full_text_url", "publication_full_text_url"),
+        ("publication_ids", "publication_ids"),
+    ]
+
+    def has_value(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, tuple, set)):
+            return any(str(item).strip() for item in value)
+        return True
+
+    origins: list[str] = []
+    for key, label in mapping:
+        if has_value(candidate.get(key)):
+            origins.append(label)
+    return origins
+
+
+def _zero_score_payload(
+    candidate: dict[str, Any],
+    *,
+    homepage: str,
+    reason: str,
+) -> dict[str, Any]:
+    publication_ids = candidate.get("publication_ids")
+    if not publication_ids:
+        publication_ids = _publication_identifiers(candidate)
+        if publication_ids:
+            candidate["publication_ids"] = publication_ids
+
+    rationale_lookup = {
+        "publication_url": "Homepage unavailable for scoring (only publication links).",
+        "missing_homepage": "Homepage unavailable for scoring (no homepage provided).",
+    }
+    rationale = rationale_lookup.get(reason, "Homepage unavailable for scoring.")
+
+    zero_bio = {key: 0.0 for key in ("A1", "A2", "A3", "A4", "A5")}
+    zero_doc = {key: 0.0 for key in ("B1", "B2", "B3", "B4", "B5")}
+
+    return {
+        "tool_name": candidate.get("title")
+        or candidate.get("name")
+        or candidate.get("tool_id")
+        or "",
+        "homepage": homepage,
+        "publication_ids": publication_ids or [],
+        "bio_score": 0.0,
+        "bio_subscores": zero_bio,
+        "documentation_score": 0.0,
+        "documentation_subscores": zero_doc,
+        "concise_description": (candidate.get("description") or "").strip()[:280],
+        "rationale": rationale,
+        "model": "rule:no-homepage",
+        "model_params": {"reason": reason},
+        "origin_types": _origin_types(candidate),
+        "confidence_score": 0.1,
+    }
 
 
 def simple_scores(c: dict[str, Any]) -> dict[str, Any]:
@@ -185,11 +286,13 @@ def simple_scores(c: dict[str, Any]) -> dict[str, Any]:
     )
     bio = 0.8 if bio_kw else 0.4
     docs = 0.8 if primary_homepage(urls) else 0.1
+    confidence = 0.6 if docs >= 0.5 else 0.3
     return {
         "bio_score": max(0.0, min(1.0, float(bio))),
         "documentation_score": max(0.0, min(1.0, float(docs))),
         "concise_description": (c.get("description") or "").strip()[:280],
         "rationale": "heuristic pre-LLM scoring",
+        "confidence_score": confidence,
     }
 
 
@@ -209,6 +312,40 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
             f.write(json.dumps(r) + "\n")
 
 
+def _strip_null_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            if item is None:
+                continue
+            cleaned_item = _strip_null_fields(item)
+            if cleaned_item is None:
+                continue
+            cleaned[key] = cleaned_item
+        return cleaned
+    if isinstance(value, list):
+        cleaned_list: list[Any] = []
+        for item in value:
+            if item is None:
+                continue
+            cleaned_item = _strip_null_fields(item)
+            if cleaned_item is None:
+                continue
+            cleaned_list.append(cleaned_item)
+        return cleaned_list
+    if isinstance(value, tuple):
+        cleaned_items = []
+        for item in value:
+            if item is None:
+                continue
+            cleaned_item = _strip_null_fields(item)
+            if cleaned_item is None:
+                continue
+            cleaned_items.append(cleaned_item)
+        return tuple(cleaned_items)
+    return value
+
+
 def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     ensure_parent(path)
     fieldnames = [
@@ -216,8 +353,11 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
         "title",
         "tool_name",
         "homepage",
+        "homepage_status",
+        "homepage_error",
         "publication_ids",
         "include",
+        "in_biotools_name",
         "in_biotools",
         "bio_score",
         "bio_A1",
@@ -226,6 +366,7 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
         "bio_A4",
         "bio_A5",
         "documentation_score",
+        "confidence_score",
         "doc_B1",
         "doc_B2",
         "doc_B3",
@@ -244,15 +385,38 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
             bio_subscores = scores.get("bio_subscores") or {}
             doc_subscores = scores.get("documentation_subscores") or {}
             in_registry_value = row.get("in_biotools")
+            name_registry_value = row.get("in_biotools_name")
+            publication_ids = row.get("publication_ids")
+            if isinstance(publication_ids, (list, tuple)):
+                publication_ids_str = ", ".join(str(p) for p in publication_ids if p)
+            elif publication_ids:
+                publication_ids_str = str(publication_ids)
+            else:
+                publication_ids_str = ""
+
+            origin_types_value = scores.get("origin_types")
+            if isinstance(origin_types_value, (list, tuple)):
+                origin_types_str = ", ".join(str(v) for v in origin_types_value if v)
+            elif origin_types_value:
+                origin_types_str = str(origin_types_value)
+            else:
+                origin_types_str = ""
             writer.writerow(
                 {
                     "id": row.get("id", ""),
                     "title": row.get("title", ""),
                     "tool_name": scores.get("tool_name", ""),
                     "homepage": row.get("homepage", ""),
-                    "publication_ids": ", ".join(row.get("publication_ids", []) or []),
+                    "homepage_status": row.get("homepage_status", ""),
+                    "homepage_error": row.get("homepage_error", ""),
+                    "publication_ids": publication_ids_str,
                     "include": row.get("include", False),
-                    "in_biotools": "" if in_registry_value is None else in_registry_value,
+                    "in_biotools_name": (
+                        "" if name_registry_value is None else name_registry_value
+                    ),
+                    "in_biotools": (
+                        "" if in_registry_value is None else in_registry_value
+                    ),
                     "bio_score": scores.get("bio_score", ""),
                     "bio_A1": bio_subscores.get("A1", ""),
                     "bio_A2": bio_subscores.get("A2", ""),
@@ -260,6 +424,7 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
                     "bio_A4": bio_subscores.get("A4", ""),
                     "bio_A5": bio_subscores.get("A5", ""),
                     "documentation_score": scores.get("documentation_score", ""),
+                    "confidence_score": scores.get("confidence_score", ""),
                     "doc_B1": doc_subscores.get("B1", ""),
                     "doc_B2": doc_subscores.get("B2", ""),
                     "doc_B3": doc_subscores.get("B3", ""),
@@ -268,7 +433,7 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
                     "concise_description": scores.get("concise_description", ""),
                     "rationale": scores.get("rationale", ""),
                     "model": scores.get("model", ""),
-                    "origin_types": ", ".join(scores.get("origin_types", [])),
+                    "origin_types": origin_types_str,
                 }
             )
 
@@ -287,6 +452,54 @@ def include_candidate(
     )
 
 
+def _parse_status_code(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    match = re.match(r"^(\d{3})", text)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _homepage_is_usable(
+    homepage: str | None,
+    status: Any,
+    error: Any,
+) -> bool:
+    if not homepage or not str(homepage).strip():
+        return False
+    code = _parse_status_code(status)
+    if code is not None and code >= 400:
+        return False
+    if isinstance(error, str) and error.strip():
+        return False
+    return True
+
+
+def _apply_documentation_penalty(
+    scores: dict[str, Any],
+    homepage_ok: bool,
+) -> None:
+    if homepage_ok:
+        return
+    scores["documentation_score"] = 0.0
+    doc_subscores = scores.get("documentation_subscores")
+    if isinstance(doc_subscores, dict):
+        for key in ("B1", "B2", "B3", "B4", "B5"):
+            if key in doc_subscores:
+                doc_subscores[key] = 0.0
+
+
 def to_entry(c: dict[str, Any], homepage: str | None) -> dict[str, Any]:
     name = c.get("title") or c.get("name") or "Unnamed Tool"
     desc = c.get("description") or "Candidate tool from Pub2Tools"
@@ -301,8 +514,21 @@ def to_entry(c: dict[str, Any], homepage: str | None) -> dict[str, Any]:
     if docs:
         entry["documentation"] = [{"url": str(u), "type": ["Manual"]} for u in docs]
     # Add tags as topic if present
-    if c.get("tags"):
-        entry["topic"] = [{"term": t, "uri": ""} for t in c["tags"]]
+    tags = c.get("tags")
+    if tags:
+        topics: list[dict[str, str]] = []
+        for raw in tags:
+            if raw is None:
+                continue
+            if isinstance(raw, str):
+                text = raw.strip()
+            else:
+                text = str(raw).strip()
+            if not text:
+                continue
+            topics.append({"term": text, "uri": ""})
+        if topics:
+            entry["topic"] = topics
     # Optionally add homepage as link if not present in documentation
     if homepage and not any(
         homepage == d.get("url") for d in entry.get("documentation", [])
@@ -757,6 +983,7 @@ def execute_run(
     model: str | None = None,
     concurrency: int = 8,
     input_path: str | None = None,
+    registry_path: str | None = None,
     offline: bool = False,
     edam_owl: str | None = None,
     idf: str | None = None,
@@ -948,13 +1175,27 @@ def execute_run(
 
         base_output_root = Path(output_root) if output_root is not None else Path("out")
 
-        from_label_date = fetch_from_dt.date().isoformat()
-        to_label_date = (
-            fetch_to_dt.date().isoformat()
-            if fetch_to_dt
-            else datetime.now(UTC).date().isoformat()
+        explicit_input = input_path or os.environ.get("BIOTOOLS_ANNOTATE_INPUT")
+        explicit_input = explicit_input or os.environ.get("BIOTOOLS_ANNOTATE_JSON")
+        has_explicit_input = bool(explicit_input)
+        custom_label = "custom_tool_set"
+        custom_root_exists = (base_output_root / custom_label).exists()
+        resume_from_cache = (
+            resume_from_enriched or resume_from_pub2tools or resume_from_scoring
         )
-        time_period_label = f"range_{from_label_date}_to_{to_label_date}"
+        use_custom_label = has_explicit_input or (
+            resume_from_cache and custom_root_exists
+        )
+        if use_custom_label:
+            time_period_label = custom_label
+        else:
+            from_label_date = fetch_from_dt.date().isoformat()
+            to_label_date = (
+                fetch_to_dt.date().isoformat()
+                if fetch_to_dt
+                else datetime.now(UTC).date().isoformat()
+            )
+            time_period_label = f"range_{from_label_date}_to_{to_label_date}"
         time_period_root = base_output_root / time_period_label
         time_period_root_abs = time_period_root.resolve()
         base_output_root_abs = base_output_root.resolve()
@@ -1207,8 +1448,29 @@ def execute_run(
                         or "https://github.com/edamontology/edammap/raw/master/doc/biotools.idf",
                         idf_stemmed=idf_stemmed
                         or "https://github.com/edamontology/edammap/raw/master/doc/biotools.stemmed.idf",
-                        base_output_dir=time_period_root / "pub2tools",
                     )
+                    latest_export = _find_latest_pub2tools_export(Path("out/pub2tools"))
+                    if latest_export:
+                        target_dir = time_period_root / "pub2tools"
+                        target_dir.mkdir(parents=True, exist_ok=True)
+                        target_path = target_dir / "to_biotools.json"
+                        try:
+                            shutil.copy2(latest_export, target_path)
+                            logger.info(
+                                "FETCH cached Pub2Tools export -> %s",
+                                target_path,
+                            )
+                        except Exception as copy_exc:
+                            logger.warning(
+                                "Failed to copy Pub2Tools export from %s to %s: %s",
+                                latest_export,
+                                target_path,
+                                copy_exc,
+                            )
+                    else:
+                        logger.warning(
+                            "FETCH completed but no to_biotools.json found under out/pub2tools"
+                        )
                     logger.info(
                         "FETCH complete – %d candidates retrieved from Pub2Tools",
                         len(candidates),
@@ -1222,6 +1484,13 @@ def execute_run(
                     set_status(0, "GATHER – Pub2Tools fetch failed")
                     candidates = candidates or []
 
+        registry_candidates: list[Path] = []
+        if registry_path:
+            try:
+                registry_candidates.append(Path(registry_path))
+            except Exception as exc:
+                logger.warning("Invalid registry path %s: %s", registry_path, exc)
+
         registry_search_roots: list[Path] = []
         pub2tools_dir = time_period_root / "pub2tools"
         registry_search_roots.append(pub2tools_dir)
@@ -1230,11 +1499,18 @@ def execute_run(
         if env_input:
             registry_search_roots.append(Path(env_input).parent)
 
+        registry_candidates.extend(registry_search_roots)
+
         if registry is None:
-            for root in registry_search_roots:
+            for root in registry_candidates:
                 registry = load_registry_from_pub2tools(root, logger=logger)
                 if registry:
                     break
+        if registry is None and registry_path:
+            logger.warning(
+                "Requested registry path %s could not be loaded; membership checks disabled",
+                registry_path,
+            )
 
         if candidates:
             logger.info(step_msg(2, "DEDUP – Filter candidate list"))
@@ -1268,26 +1544,39 @@ def execute_run(
             set_status(1, "DEDUP – no candidates available")
 
         if registry:
-            registry_hits = 0
+            registry_name_hits = 0
+            registry_exact_hits = 0
             for candidate in candidates:
                 name = candidate.get("title") or candidate.get("name")
-                homepage = candidate.get("homepage")
+                homepage_value = candidate.get("homepage")
+                if isinstance(homepage_value, str) and is_probable_publication_url(
+                    homepage_value
+                ):
+                    homepage_value = None
+                    candidate.pop("homepage", None)
+                homepage = homepage_value
                 if not homepage:
                     homepage = primary_homepage(candidate.get("urls") or [])
                     if homepage:
-                        candidate.setdefault("homepage", homepage)
-                in_registry = registry.contains(name, homepage)
-                candidate["in_biotools"] = in_registry
-                if in_registry:
-                    registry_hits += 1
+                        candidate["homepage"] = homepage
+                name_match = registry.contains_name(name)
+                homepage_match = registry.contains(name, homepage)
+                candidate["in_biotools_name"] = name_match
+                candidate["in_biotools"] = homepage_match
+                if name_match:
+                    registry_name_hits += 1
+                if homepage_match:
+                    registry_exact_hits += 1
             if candidates:
                 logger.info(
-                    "REGISTRY matched %d/%d candidates to existing bio.tools records",
-                    registry_hits,
+                    "REGISTRY name matches: %d/%d; exact homepage matches: %d",
+                    registry_name_hits,
                     len(candidates),
+                    registry_exact_hits,
                 )
         else:
             for candidate in candidates:
+                candidate["in_biotools_name"] = None
                 candidate["in_biotools"] = None
 
         if candidates and enriched_cache and not resume_from_enriched:
@@ -1430,32 +1719,55 @@ def execute_run(
             for cached_row in cached_assessment_rows or []:
                 row = deepcopy(cached_row)
                 scores = row.get("scores") or {}
+                if not isinstance(scores, dict):
+                    scores = {}
+                if "confidence_score" not in scores:
+                    scores["confidence_score"] = 0.0
+                row["scores"] = scores
                 homepage = str(row.get("homepage") or "").strip()
+                homepage_status = row.get("homepage_status")
+                homepage_error = row.get("homepage_error")
                 candidate = _match_candidate_from_report(row, by_id, by_title)
                 if candidate is None:
+                    homepage_ok = _homepage_is_usable(
+                        homepage, homepage_status, homepage_error
+                    )
+                    _apply_documentation_penalty(scores, homepage_ok)
                     include = include_candidate(
                         scores,
                         min_bio_score=min_bio_score,
                         min_doc_score=min_doc_score,
-                        has_homepage=bool(homepage),
+                        has_homepage=homepage_ok,
                     )
+                    row["homepage_status"] = homepage_status
+                    row["homepage_error"] = homepage_error
                     row["include"] = include
                     row.setdefault("in_biotools", None)
+                    row.setdefault("in_biotools_name", None)
                     unmatched_report_rows += 1
                     report_rows.append(row)
                     continue
                 urls = [str(u) for u in (candidate.get("urls") or [])]
                 if not homepage:
                     homepage = candidate.get("homepage") or primary_homepage(urls) or ""
+                homepage_status = candidate.get("homepage_status", homepage_status)
+                homepage_error = candidate.get("homepage_error", homepage_error)
+                homepage_ok = _homepage_is_usable(
+                    homepage, homepage_status, homepage_error
+                )
+                _apply_documentation_penalty(scores, homepage_ok)
                 include = include_candidate(
                     scores,
                     min_bio_score=min_bio_score,
                     min_doc_score=min_doc_score,
-                    has_homepage=bool(homepage),
+                    has_homepage=homepage_ok,
                 )
                 row["homepage"] = homepage
+                row["homepage_status"] = homepage_status
+                row["homepage_error"] = homepage_error
                 row["include"] = include
                 row["in_biotools"] = candidate.get("in_biotools")
+                row["in_biotools_name"] = candidate.get("in_biotools_name")
                 report_rows.append(row)
                 if include:
                     payload.append(to_entry(candidate, homepage))
@@ -1485,8 +1797,44 @@ def execute_run(
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             def heuristic_score_one(c: dict[str, Any]):
-                urls = [str(u) for u in (c.get("urls") or [])]
-                homepage = c.get("homepage") or primary_homepage(urls) or ""
+                homepage, homepage_reason = _resolve_scoring_homepage(c)
+                if homepage_reason:
+                    zero_scores = _zero_score_payload(
+                        c, homepage=homepage, reason=homepage_reason
+                    )
+                    include = include_candidate(
+                        zero_scores,
+                        min_bio_score=min_bio_score,
+                        min_doc_score=min_doc_score,
+                        has_homepage=False,
+                    )
+                    decision = {
+                        "id": str(
+                            c.get("id")
+                            or c.get("tool_id")
+                            or c.get("biotools_id")
+                            or c.get("biotoolsID")
+                            or c.get("identifier")
+                            or ""
+                        ),
+                        "title": str(
+                            c.get("title")
+                            or c.get("name")
+                            or c.get("tool_title")
+                            or c.get("display_title")
+                            or ""
+                        ),
+                        "homepage": homepage,
+                        "homepage_status": c.get("homepage_status"),
+                        "homepage_error": c.get("homepage_error"),
+                        "publication_ids": zero_scores.get("publication_ids", []),
+                        "scores": zero_scores,
+                        "include": include,
+                        "in_biotools": c.get("in_biotools"),
+                        "in_biotools_name": c.get("in_biotools_name"),
+                    }
+                    return (decision, c, homepage, include)
+
                 publication_ids = _publication_identifiers(c)
                 if publication_ids:
                     c.setdefault("publication_ids", publication_ids)
@@ -1507,20 +1855,29 @@ def execute_run(
                 )
                 scores = simple_scores(c)
                 scores.setdefault("model", "heuristic")
+                homepage_status = c.get("homepage_status")
+                homepage_error = c.get("homepage_error")
+                homepage_ok = _homepage_is_usable(
+                    homepage, homepage_status, homepage_error
+                )
+                _apply_documentation_penalty(scores, homepage_ok)
                 include = include_candidate(
                     scores,
                     min_bio_score=min_bio_score,
                     min_doc_score=min_doc_score,
-                    has_homepage=bool(homepage),
+                    has_homepage=homepage_ok,
                 )
                 decision = {
                     "id": str(candidate_id),
                     "title": str(title),
                     "homepage": homepage,
+                    "homepage_status": homepage_status,
+                    "homepage_error": homepage_error,
                     "publication_ids": publication_ids,
                     "scores": scores,
                     "include": include,
                     "in_biotools": c.get("in_biotools"),
+                    "in_biotools_name": c.get("in_biotools_name"),
                 }
                 return (decision, c, homepage, include)
 
@@ -1555,8 +1912,44 @@ def execute_run(
             else:
 
                 def score_one(c):
-                    urls = [str(u) for u in (c.get("urls") or [])]
-                    homepage = c.get("homepage") or primary_homepage(urls) or ""
+                    homepage, homepage_reason = _resolve_scoring_homepage(c)
+                    if homepage_reason:
+                        zero_scores = _zero_score_payload(
+                            c, homepage=homepage, reason=homepage_reason
+                        )
+                        include = include_candidate(
+                            zero_scores,
+                            min_bio_score=min_bio_score,
+                            min_doc_score=min_doc_score,
+                            has_homepage=False,
+                        )
+                        decision = {
+                            "id": str(
+                                c.get("id")
+                                or c.get("tool_id")
+                                or c.get("biotools_id")
+                                or c.get("biotoolsID")
+                                or c.get("identifier")
+                                or ""
+                            ),
+                            "title": str(
+                                c.get("title")
+                                or c.get("name")
+                                or c.get("tool_title")
+                                or c.get("display_title")
+                                or ""
+                            ),
+                            "homepage": homepage,
+                            "homepage_status": c.get("homepage_status"),
+                            "homepage_error": c.get("homepage_error"),
+                            "publication_ids": zero_scores.get("publication_ids", []),
+                            "scores": zero_scores,
+                            "include": include,
+                            "in_biotools": c.get("in_biotools"),
+                            "in_biotools_name": c.get("in_biotools_name"),
+                        }
+                        return (decision, c, homepage, include)
+
                     publication_ids = _publication_identifiers(c)
                     if publication_ids:
                         c.setdefault("publication_ids", publication_ids)
@@ -1588,20 +1981,29 @@ def execute_run(
                             3, "SCORE – temporary LLM failure, heuristics applied"
                         )
                         return heuristic_score_one(c)
+                    homepage_status = c.get("homepage_status")
+                    homepage_error = c.get("homepage_error")
+                    homepage_ok = _homepage_is_usable(
+                        homepage, homepage_status, homepage_error
+                    )
+                    _apply_documentation_penalty(scores, homepage_ok)
                     include = include_candidate(
                         scores,
                         min_bio_score=min_bio_score,
                         min_doc_score=min_doc_score,
-                        has_homepage=bool(homepage),
+                        has_homepage=homepage_ok,
                     )
                     decision = {
                         "id": str(candidate_id),
                         "title": str(title),
                         "homepage": homepage,
+                        "homepage_status": homepage_status,
+                        "homepage_error": homepage_error,
                         "publication_ids": publication_ids,
                         "scores": scores,
                         "include": include,
                         "in_biotools": c.get("in_biotools"),
+                        "in_biotools_name": c.get("in_biotools_name"),
                     }
                     return (decision, c, homepage, include)
 
@@ -1694,6 +2096,8 @@ def execute_run(
         report_csv = report.with_suffix(".csv")
         logger.info(f"📝 Writing CSV report to {report_csv}")
         write_report_csv(report_csv, report_rows)
+
+        payload = [_strip_null_fields(entry) for entry in payload]
 
         invalids = []
         for entry in payload:
