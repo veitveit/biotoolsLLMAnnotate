@@ -75,19 +75,35 @@ def _run_impl(
         max=1.0,
         help="Legacy combined threshold applied to both bio and documentation scores when separate thresholds are not provided.",
     ),
-    min_bio_score: float | None = typer.Option(
+    min_bio_score_add: float | None = typer.Option(
         None,
+        "--min-bio-score-add",
         "--min-bio-score",
         min=0.0,
         max=1.0,
-        help="Minimum bio score required for inclusion (overrides pipeline.min_bio_score).",
+        help="Minimum bio score required for an automatic add decision (overrides pipeline.bio_score_thresholds.add).",
     ),
-    min_doc_score: float | None = typer.Option(
+    min_bio_score_review: float | None = typer.Option(
         None,
+        "--min-bio-score-review",
+        min=0.0,
+        max=1.0,
+        help="Minimum bio score required to trigger a manual review decision (overrides pipeline.bio_score_thresholds.review).",
+    ),
+    min_doc_score_add: float | None = typer.Option(
+        None,
+        "--min-doc-score-add",
         "--min-doc-score",
         min=0.0,
         max=1.0,
-        help="Minimum documentation score required for inclusion (overrides pipeline.min_documentation_score).",
+        help="Minimum documentation score required for an automatic add decision (overrides pipeline.documentation_score_thresholds.add).",
+    ),
+    min_doc_score_review: float | None = typer.Option(
+        None,
+        "--min-doc-score-review",
+        min=0.0,
+        max=1.0,
+        help="Minimum documentation score required to trigger a manual review decision (overrides pipeline.documentation_score_thresholds.review).",
     ),
     limit: int | None = typer.Option(
         None, "--limit", help="Max candidates to process."
@@ -234,11 +250,10 @@ def _run_impl(
             registry_path = config_registry
 
     if resume_from_pub2tools and input_path:
-        typer.echo(
-            "--resume-from-pub2tools cannot be used together with --input or pipeline.input_path",
-            err=True,
+        raise typer.BadParameter(
+            "cannot be used together with --input or pipeline.input_path",
+            param_hint="--resume-from-pub2tools",
         )
-        raise typer.Exit(code=2)
 
     # Determine score thresholds (CLI > legacy min-score > config > default)
     def _coerce_threshold(value, default):
@@ -247,24 +262,66 @@ def _run_impl(
         except (TypeError, ValueError):
             return default
 
-    config_min_bio = pipeline_cfg.get("min_bio_score")
-    config_min_doc = pipeline_cfg.get("min_documentation_score")
+    bio_cfg = pipeline_cfg.get("bio_score_thresholds") or {}
+    doc_cfg = pipeline_cfg.get("documentation_score_thresholds") or {}
+
+    config_bio_add = bio_cfg.get("add")
+    config_bio_review = bio_cfg.get("review")
+    config_doc_add = doc_cfg.get("add")
+    config_doc_review = doc_cfg.get("review")
+
+    # Legacy key fallbacks
+    if config_bio_add is None:
+        config_bio_add = pipeline_cfg.get("min_bio_score")
+    if config_doc_add is None:
+        config_doc_add = pipeline_cfg.get("min_documentation_score")
+    if config_bio_review is None:
+        config_bio_review = pipeline_cfg.get("min_bio_score_review")
+    if config_doc_review is None:
+        config_doc_review = pipeline_cfg.get("min_documentation_score_review")
+
+    DEFAULT_BIO_ADD = 0.6
+    DEFAULT_BIO_REVIEW = 0.5
+    DEFAULT_DOC_ADD = 0.6
+    DEFAULT_DOC_REVIEW = 0.5
 
     if min_score is not None:
-        if min_bio_score is None:
-            min_bio_score = min_score
-        if min_doc_score is None:
-            min_doc_score = min_score
+        if min_bio_score_add is None:
+            min_bio_score_add = min_score
+        if min_doc_score_add is None:
+            min_doc_score_add = min_score
+        if min_bio_score_review is None:
+            min_bio_score_review = min_score
+        if min_doc_score_review is None:
+            min_doc_score_review = min_score
 
-    if min_bio_score is None:
-        min_bio_score = _coerce_threshold(config_min_bio, 0.6)
-    else:
-        min_bio_score = _coerce_threshold(min_bio_score, 0.6)
+    bio_add_threshold = _coerce_threshold(
+        min_bio_score_add if min_bio_score_add is not None else config_bio_add,
+        DEFAULT_BIO_ADD,
+    )
+    doc_add_threshold = _coerce_threshold(
+        min_doc_score_add if min_doc_score_add is not None else config_doc_add,
+        DEFAULT_DOC_ADD,
+    )
 
-    if min_doc_score is None:
-        min_doc_score = _coerce_threshold(config_min_doc, 0.6)
-    else:
-        min_doc_score = _coerce_threshold(min_doc_score, 0.6)
+    bio_review_threshold = _coerce_threshold(
+        min_bio_score_review if min_bio_score_review is not None else config_bio_review,
+        DEFAULT_BIO_REVIEW,
+    )
+    doc_review_threshold = _coerce_threshold(
+        min_doc_score_review if min_doc_score_review is not None else config_doc_review,
+        DEFAULT_DOC_REVIEW,
+    )
+
+    bio_review_threshold = max(0.0, min(bio_review_threshold, 1.0))
+    bio_add_threshold = max(0.0, min(bio_add_threshold, 1.0))
+    doc_review_threshold = max(0.0, min(doc_review_threshold, 1.0))
+    doc_add_threshold = max(0.0, min(doc_add_threshold, 1.0))
+
+    if bio_review_threshold > bio_add_threshold:
+        bio_review_threshold = bio_add_threshold
+    if doc_review_threshold > doc_add_threshold:
+        doc_review_threshold = doc_add_threshold
 
     # Set logging level
     import logging
@@ -292,8 +349,8 @@ def _run_impl(
         execute_run(
             from_date=from_date,
             to_date=to_date,
-            min_bio_score=min_bio_score,
-            min_doc_score=min_doc_score,
+            bio_thresholds=(bio_review_threshold, bio_add_threshold),
+            doc_thresholds=(doc_review_threshold, doc_add_threshold),
             limit=limit,
             dry_run=dry_run,
             model=model,
@@ -315,7 +372,6 @@ def _run_impl(
         )
     except Exception as e:
         import traceback
-        import typer
 
         typer.echo("\nERROR: Unhandled exception in pipeline:", err=True)
         typer.echo(str(e), err=True)

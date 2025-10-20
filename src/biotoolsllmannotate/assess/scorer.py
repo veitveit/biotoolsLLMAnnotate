@@ -3,7 +3,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .ollama_client import OllamaClient, OllamaConnectionError
-from biotoolsllmannotate.config import get_config_yaml
+from biotoolsllmannotate.config import DEFAULT_CONFIG_YAML, get_config_yaml
 from biotoolsllmannotate.enrich import is_probable_publication_url
 
 
@@ -283,6 +283,43 @@ def _score_from_response(
     return clamp_score(averaged), breakdown
 
 
+def _documentation_score_v2(breakdown, fallback: float | None) -> float:
+    weights = {"B1": 2.0, "B2": 1.0, "B3": 1.0, "B4": 1.0, "B5": 2.0}
+    denominator = sum(weights.values())
+
+    if isinstance(breakdown, Mapping):
+        numerator = 0.0
+        have_any = False
+        for key, weight in weights.items():
+            raw = breakdown.get(key)
+            if raw is not None:
+                have_any = True
+            value = _coerce_float(raw)
+            if value is None:
+                value = 0.0
+            numerator += clamp_score(value) * weight
+        if have_any:
+            return clamp_score(numerator / denominator)
+
+    if isinstance(breakdown, Sequence) and not isinstance(breakdown, (str, bytes)):
+        items = list(breakdown)
+        numerator = 0.0
+        have_any = False
+        for idx, key in enumerate(weights):
+            raw = items[idx] if idx < len(items) else None
+            if raw is not None:
+                have_any = True
+            value = _coerce_float(raw)
+            if value is None:
+                value = 0.0
+            numerator += clamp_score(value) * list(weights.values())[idx]
+        if have_any:
+            return clamp_score(numerator / denominator)
+
+    fallback_value = fallback if fallback is not None else 0.0
+    return clamp_score(fallback_value)
+
+
 def _candidate_homepage(candidate: dict) -> str:
     homepage = candidate.get("homepage")
     if isinstance(homepage, str):
@@ -445,74 +482,17 @@ class Scorer:
         }
         result["bio_subscores"] = bio_breakdown or {}
         result["documentation_subscores"] = doc_breakdown or {}
+        doc_score_v2 = _documentation_score_v2(doc_breakdown, doc_score)
+        if doc_score_v2 != doc_score:
+            result["documentation_score_raw"] = doc_score
+        result["doc_score_v2"] = doc_score_v2
+        result["documentation_score"] = doc_score_v2
         return result
 
     def _build_prompt(self, candidate: dict) -> str:
         template = self.config.get("scoring_prompt_template")
         if not template:
-            template = """You are evaluating whether a software resource is worth getting registered in bio.tools, the registry for software resources in the life sciences.
-
-Available material:
-
-Title: {title}
-Description: {description}
-Homepage: {homepage}
-Homepage status: {homepage_status}
-Homepage error: {homepage_error}
-Documentation links: {documentation}
-Documentation keywords found on homepage: {documentation_keywords}
-Repository: {repository}
-Found keywords: {tags}
-Published: {published_at}
-Publication abstract: {publication_abstract}
-Publication full text: {publication_full_text}
-Known publication identifiers: {publication_ids}
-
-Task:
-Score the resource using the rubric below. For every subcriterion assign exactly one of {{0, 0.5, 1}}. Base every decision only on the provided material. Do not invent facts or URLs. If the resource is not life-science software, set ALL bio subcriteria A1–A5 = 0 and explain why in the rationale.
-
-Bio score rubric
-A1 Biological intent stated (explicit life-science task/domain).
-A2 Operations on biological data described
-A3 Software with biological data I/O: 0 = none; 0.5 = only generic; 1 = concrete datatypes/formats named.
-A4 Modality explicitly classifiable as one or more of: database portal, desktop application, web application, web API, web service, SPARQL endpoint, command-line tool (CLI), workbench, suite, plug-in, workflow, library, ontology. Include minimal usage context.
-A5 Evidence of bio use (examples on real bio data OR peer-reviewed/benchmark citation).
-
-Documentation score rubric (subcriteria only; no overall score here)
-B1 Documentation completeness (e.g. manual, guide, readthedocs).
-B2 Installation pathways (e.g. installation/setup, config, container, package).
-B3 Reproducibility aids (e.g. doi, release).
-B4 Maintenance signal (e.g. commits, issue tracker, news).
-B5 Onboarding & support (e.g. quickstart/tutorial, contact, faq).
-
-Selection/normalization rules:
-
-Base every decision on the supplied material only.
-Normalize publication identifiers to prefixes: DOI:..., PMID:..., PMCID:... and remove duplicates (case-insensitive).
-For any subcriterion scored 0 due to missing evidence, mention "insufficient evidence: <item>" in the rationale.
-Record each bio subcriterion as numbers {{0,0.5,1}} in `bio_subscores` and each documentation subcriterion as numbers {{0,0.5,1}} in `documentation_subscores`.
-Provide `confidence_score` as a number between 0 and 1 summarizing your certainty in the assessment (higher means more confident).
-Do NOT compute aggregate scores; only fill the provided fields.
-Do not output any value outside [0.0, 1.0].
-Always emit every field in the output JSON exactly once.
-Emit ONLY the fields in the schema below. Use "" for unknown strings and [] if no publication identifiers are found. Do not output booleans/strings instead of numbers.
-
-JSON schema describing the required output:
-{json_schema}
-
-Before replying, validate your draft against this schema. If the JSON does not pass validation, fix it and revalidate until it does. Output only the validated JSON; never include commentary or surrounding text.
-
-Output: respond ONLY with a single JSON object shaped as:
-{{
-"tool_name": "<derived display name>",
-"homepage": "<best homepage URL>",
-"publication_ids": ["DOI:...", "PMID:...", "PMCID:..."],
-"bio_subscores": {{"A1": <0|0.5|1>, "A2": <0|0.5|1>, "A3": <0|0.5|1>, "A4": <0|0.5|1>, "A5": <0|0.5|1>}},
-"documentation_subscores": {{"B1": <0|0.5|1>, "B2": <0|0.5|1>, "B3": <0|0.5|1>, "B4": <0|0.5|1>, "B5": <0|0.5|1>}},
-"confidence_score": <0–1 numeric confidence>,
-"concise_description": "<1–2 sentence rewritten summary>",
-"rationale": "<2–5 sentences citing specific evidence for both score groups; for each claim indicate the source as one of: homepage, documentation, repository, abstract, full_text, tags; explicitly name missing items as 'insufficient evidence: ...'>"
-}}"""
+            template = DEFAULT_CONFIG_YAML["scoring_prompt_template"]
 
         publication_ids = candidate.get("publication_ids") or []
         documentation_value = candidate.get("documentation")

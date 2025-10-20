@@ -22,6 +22,22 @@ from biotoolsllmannotate.enrich import is_probable_publication_url
 from biotoolsllmannotate.version import __version__
 
 
+DOC_SUBSCORES = {
+    "B1": 1.0,
+    "B2": 1.0,
+    "B3": 1.0,
+    "B4": 0.5,
+    "B5": 0.5,
+}
+DOC_SCORE_V2 = (
+    2 * DOC_SUBSCORES["B1"]
+    + DOC_SUBSCORES["B2"]
+    + DOC_SUBSCORES["B3"]
+    + DOC_SUBSCORES["B4"]
+    + 2 * DOC_SUBSCORES["B5"]
+) / 7
+
+
 class DummyScorer:
     """Deterministic scorer used to stub LLM scoring calls."""
 
@@ -45,6 +61,8 @@ class DummyScorer:
                 homepage = url
                 break
         publication_ids = candidate.get("publication_ids", [])
+        doc_subscores = DOC_SUBSCORES.copy()
+        doc_score_v2 = DOC_SCORE_V2
         return {
             "tool_name": tool_name,
             "homepage": homepage,
@@ -57,14 +75,8 @@ class DummyScorer:
                 "A4": 1.0,
                 "A5": 0.5,
             },
-            "documentation_score": 0.8,
-            "documentation_subscores": {
-                "B1": 1.0,
-                "B2": 1.0,
-                "B3": 1.0,
-                "B4": 0.5,
-                "B5": 0.5,
-            },
+            "documentation_score": doc_score_v2,
+            "documentation_subscores": doc_subscores,
             "concise_description": "Short summary.",
             "rationale": "Strong bioinformatics focus",
             "model": "llama3.2",
@@ -75,8 +87,81 @@ class DummyScorer:
         }
 
 
+def test_classify_candidate_requires_execution_path() -> None:
+    scores = {
+        "bio_score": 0.85,
+        "bio_subscores": {"A4": 0.5},
+        "documentation_score": 0.0,
+        "documentation_subscores": {
+            "B1": 1.0,
+            "B2": 0.0,
+            "B3": 1.0,
+            "B4": 0.0,
+            "B5": 1.0,
+        },
+    }
+    decision = run_module.classify_candidate(  # type: ignore[attr-defined]
+        scores,
+        bio_thresholds=(0.5, 0.6),
+        doc_thresholds=(0.3, 0.4),
+        has_homepage=True,
+    )
+    assert decision == "review"
+    assert scores["doc_score_v2"] == pytest.approx(5 / 7)
+    assert scores["documentation_score_raw"] == pytest.approx(0.0)
+
+
+def test_classify_candidate_requires_repro_anchor() -> None:
+    scores = {
+        "bio_score": 0.9,
+        "bio_subscores": {"A4": 1.0},
+        "documentation_score": 0.0,
+        "documentation_subscores": {
+            "B1": 1.0,
+            "B2": 1.0,
+            "B3": 0.0,
+            "B4": 0.0,
+            "B5": 1.0,
+        },
+    }
+    decision = run_module.classify_candidate(  # type: ignore[attr-defined]
+        scores,
+        bio_thresholds=(0.5, 0.6),
+        doc_thresholds=(0.3, 0.4),
+        has_homepage=True,
+    )
+    assert decision == "review"
+    assert scores["doc_score_v2"] == pytest.approx(5 / 7)
+    assert scores["documentation_score_raw"] == pytest.approx(0.0)
+
+
+def test_classify_candidate_add_when_requirements_met() -> None:
+    scores = {
+        "bio_score": 0.9,
+        "bio_subscores": {"A4": 1.0},
+        "documentation_score": 0.0,
+        "documentation_subscores": {
+            "B1": 1.0,
+            "B2": 1.0,
+            "B3": 0.5,
+            "B4": 0.5,
+            "B5": 1.0,
+        },
+    }
+    decision = run_module.classify_candidate(  # type: ignore[attr-defined]
+        scores,
+        bio_thresholds=(0.5, 0.6),
+        doc_thresholds=(0.3, 0.4),
+        has_homepage=True,
+    )
+    assert decision == "add"
+    assert scores["doc_score_v2"] == pytest.approx(6 / 7)
+
+
 def test_write_report_csv(tmp_path: Path) -> None:
     """Write a CSV report with flattened scoring columns."""
+    doc_subscores = DOC_SUBSCORES.copy()
+    doc_score_v2 = DOC_SCORE_V2
     rows = [
         {
             "id": "tool-1",
@@ -85,7 +170,7 @@ def test_write_report_csv(tmp_path: Path) -> None:
             "homepage_status": 404,
             "homepage_error": "HTTP 404",
             "publication_ids": ["pmid:12345"],
-            "include": True,
+            "include": "add",
             "in_biotools_name": True,
             "in_biotools": True,
             "scores": {
@@ -97,14 +182,8 @@ def test_write_report_csv(tmp_path: Path) -> None:
                     "A4": 1.0,
                     "A5": 0.5,
                 },
-                "documentation_score": 0.8,
-                "documentation_subscores": {
-                    "B1": 1.0,
-                    "B2": 1.0,
-                    "B3": 1.0,
-                    "B4": 0.5,
-                    "B5": 0.5,
-                },
+                "documentation_score": DOC_SCORE_V2,
+                "documentation_subscores": DOC_SUBSCORES.copy(),
                 "concise_description": "Short summary.",
                 "tool_name": "Tool One",
                 "rationale": "Strong bioinformatics focus",
@@ -125,11 +204,11 @@ def test_write_report_csv(tmp_path: Path) -> None:
     assert len(data) == 1
     row = data[0]
     assert row["id"] == "tool-1"
-    assert row["include"] == "True"
+    assert row["include"] == "add"
     assert row["bio_score"] == "0.9"
     assert row["bio_A1"] == "1.0"
     assert row["bio_A5"] == "0.5"
-    assert row["documentation_score"] == "0.8"
+    assert float(row["documentation_score"]) == pytest.approx(doc_score_v2)
     assert row["doc_B4"] == "0.5"
     assert row["confidence_score"] == "0.9"
     assert row["concise_description"] == "Short summary."
@@ -176,8 +255,8 @@ def test_execute_run_emits_csv_with_identifiers(
     execute_run(
         from_date="7d",
         to_date=None,
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+        bio_thresholds=(0.5, 0.6),
+        doc_thresholds=(0.5, 0.6),
         limit=None,
         dry_run=True,
         model="llama3.2",
@@ -250,8 +329,8 @@ def test_execute_run_marks_existing_registry(
     execute_run(
         from_date="7d",
         to_date=None,
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+        bio_thresholds=(0.5, 0.6),
+        doc_thresholds=(0.5, 0.6),
         dry_run=True,
         concurrency=1,
         input_path=str(input_path),
@@ -306,8 +385,8 @@ def test_execute_run_filters_publication_homepage(
     execute_run(
         from_date="7d",
         to_date=None,
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+    bio_thresholds=(0.5, 0.6),
+    doc_thresholds=(0.5, 0.6),
         limit=None,
         dry_run=True,
         concurrency=1,
@@ -329,7 +408,7 @@ def test_execute_run_filters_publication_homepage(
     assert len(data) == 1
     row = data[0]
     assert row["homepage"] == ""
-    assert row["include"] == "False"
+    assert row["include"] == "do_not_add"
 
 
 def test_execute_run_publication_only_zero_scores(
@@ -378,8 +457,8 @@ def test_execute_run_publication_only_zero_scores(
     execute_run(
         from_date="7d",
         to_date=None,
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+        bio_thresholds=(0.6, 0.6),
+        doc_thresholds=(0.6, 0.6),
         limit=None,
         dry_run=True,
         model="llama3.2",
@@ -399,7 +478,7 @@ def test_execute_run_publication_only_zero_scores(
     decision = json.loads(lines[0])
 
     assert decision["homepage"] == ""
-    assert decision["include"] is False
+    assert decision["include"] == "do_not_add"
     assert decision["scores"]["model"] == "rule:no-homepage"
     assert decision["scores"]["bio_score"] == 0.0
     assert decision["scores"]["documentation_score"] == 0.0
@@ -429,8 +508,8 @@ def test_execute_run_payload_strips_null_fields(tmp_path: Path) -> None:
     execute_run(
         from_date="7d",
         to_date=None,
-        min_bio_score=0.0,
-        min_doc_score=0.0,
+        bio_thresholds=(0.0, 0.0),
+        doc_thresholds=(0.0, 0.0),
         dry_run=False,
         concurrency=1,
         input_path=str(input_path),
@@ -493,8 +572,8 @@ def test_execute_run_writes_updated_entries_file(
     execute_run(
         from_date="7d",
         to_date=None,
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+        bio_thresholds=(0.5, 0.6),
+        doc_thresholds=(0.5, 0.6),
         limit=None,
         dry_run=False,
         model="llama3.2",
@@ -540,8 +619,8 @@ def test_execute_run_logs_score_duration(
     execute_run(
         from_date="7d",
         to_date=None,
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+        bio_thresholds=(0.5, 0.6),
+        doc_thresholds=(0.5, 0.6),
         limit=None,
         dry_run=True,
         concurrency=1,
@@ -578,8 +657,8 @@ def test_resume_from_enriched_cache(
     execute_run(
         from_date="7d",
         to_date=None,
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+        bio_thresholds=(0.6, 0.6),
+        doc_thresholds=(0.6, 0.6),
         limit=None,
         dry_run=True,
         model="llama3.2",
@@ -599,8 +678,8 @@ def test_resume_from_enriched_cache(
     execute_run(
         from_date="7d",
         to_date=None,
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+        bio_thresholds=(0.6, 0.6),
+        doc_thresholds=(0.6, 0.6),
         limit=None,
         dry_run=False,
         resume_from_enriched=True,
@@ -646,8 +725,8 @@ def test_resume_from_pub2tools_export(
     execute_run(
         from_date="2024-01-01",
         to_date="2024-01-31",
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+        bio_thresholds=(0.6, 0.6),
+        doc_thresholds=(0.6, 0.6),
         dry_run=False,
         resume_from_pub2tools=True,
         offline=True,
@@ -721,8 +800,8 @@ def test_resume_from_pub2tools_ignores_other_ranges(
     execute_run(
         from_date="2024-05-01",
         to_date="2024-05-31",
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+        bio_thresholds=(0.6, 0.6),
+        doc_thresholds=(0.6, 0.6),
         dry_run=False,
         resume_from_pub2tools=True,
         offline=True,
@@ -784,18 +863,13 @@ def test_resume_from_scoring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
                     "A4": 1.0,
                     "A5": 0.5,
                 },
-                "documentation_score": 0.8,
-                "documentation_subscores": {
-                    "B1": 1.0,
-                    "B2": 1.0,
-                    "B3": 1.0,
-                    "B4": 0.5,
-                    "B5": 0.5,
-                },
+                "documentation_score": DOC_SCORE_V2,
+                "documentation_subscores": DOC_SUBSCORES.copy(),
                 "concise_description": "Short summary.",
                 "confidence_score": 0.4,
             },
-            "include": False,
+            "include": "do_not_add",
+            "decision": "do_not_add",
         }
     ]
     report_path.write_text(
@@ -806,8 +880,8 @@ def test_resume_from_scoring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     execute_run(
         from_date="2024-02-01",
         to_date="2024-02-28",
-        min_bio_score=0.6,
-        min_doc_score=0.6,
+        bio_thresholds=(0.6, 0.6),
+        doc_thresholds=(0.6, 0.6),
         dry_run=False,
         resume_from_enriched=True,
         resume_from_scoring=True,
@@ -831,4 +905,4 @@ def test_resume_from_scoring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         if line.strip()
     ]
     assert len(report_lines) == 1
-    assert report_lines[0]["include"] is True
+    assert report_lines[0]["include"] == "add"

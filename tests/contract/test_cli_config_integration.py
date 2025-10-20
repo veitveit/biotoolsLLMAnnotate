@@ -25,8 +25,12 @@ pub2tools:
   firefox_path: null
   p2t_cli: /custom/path/to/pub2tools
 pipeline:
-  min_bio_score: 0.6
-  min_documentation_score: 0.6
+  bio_score_thresholds:
+    add: 0.6
+    review: 0.5
+  documentation_score_thresholds:
+    add: 0.6
+    review: 0.5
   limit: null
   dry_run: false
   input_path: null

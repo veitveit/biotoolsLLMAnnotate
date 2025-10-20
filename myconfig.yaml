@@ -7,8 +7,12 @@ pipeline:
   resume_from_pub2tools: false
   resume_from_enriched: false
   resume_from_scoring: false
-  min_bio_score: 0.6
-  min_documentation_score: 0.7
+  bio_score_thresholds:
+    add: 0.7
+    review: 0.5
+  documentation_score_thresholds:
+    add: 0.5
+    review: 0.3
 pub2tools:
   edam_owl: http://edamontology.org/EDAM.owl
   idf: https://github.com/edamontology/edammap/raw/master/doc/biotools.idf
@@ -59,49 +63,109 @@ scoring_prompt_template: |
   Publication full text: {publication_full_text}
   Known publication identifiers: {publication_ids}
 
-  Note: The documentation keywords and found keywords listed above were automatically mined from the homepage, papers, and other reference material whose raw text is not included in this prompt. Treat them as secondary hints and cite them explicitly when used.
+  Note: The documentation keywords and found keywords listed above were automatically mined from the homepage, papers, and other reference material. Their raw surrounding text is not included here except for the publication abstract and publication full text fields above. Treat the keywords as secondary hints, use the abstract/full_text as primary evidence when they contain concrete statements, and always cite the specific source (abstract, full_text, keyword) when referenced. When both abstract and full_text are present, prefer full_text > abstract > homepage/documentation > repository > keyword hints.
+
+  Decision context: Downstream acceptance requires the averaged bio score and the averaged documentation score to meet or exceed 0.5. Your scoring should therefore reject (keep scores below 0.5) any resource that fails the gating checklist or lacks solid evidence in either rubric group.
+
+  Gating checklist (apply before scoring):
+
+  Life-science scope — if the material does not clearly describe a life-science or biomedical purpose, set bio_subscores A1–A5 = 0, documentation_subscores B1–B5 = 0, confidence_score ≤ 0.2, and begin the rationale with "Rejected as bio.tools candidate because domain is non-bio".
+
+  Usable software deliverable — if the resource is only a dataset, publication, benchmark, ontology/specification, tutorial/course, or otherwise lacks a runnable interface (CLI with usage, installable package, container, web/desktop app, API, or executable workflow with steps), set A1–A5 = 0, B1–B5 = 0, confidence_score ≤ 0.2, and state "Rejected ... because no usable software deliverable".
+
+  Operational access & documentation — if the homepage status is ≥ 400, homepage_error is non-empty, or no explicit documentation artifacts are present (see B1–B5 definitions), set all B-subscores to 0, mark each missing item as "insufficient evidence", and cap confidence_score at 0.3. If the homepage is reachable but provides only generic marketing text without concrete artifacts, treat documentation evidence as missing.
 
   Task:
-  Score the resource using the rubric below. For every subcriterion assign exactly one of {{0, 0.5, 1}}. Use only the provided material; do not invent facts or URLs. If the resource is not life-science software (for example, a standalone machine learning model without a usable software interface), set ALL bio subcriteria A1–A5 = 0 and explain why in the rationale.
+  Assuming the resource passes the relevant gates, score every subcriterion using exactly one of {{0, 0.5, 1}}. Use only the provided material; do not invent facts or URLs. Award ≥0.5 only when you can point to a specific artifact; award 1.0 only when there is corroboration from at least two distinct artifacts/sources.
 
   Bio score rubric
   A1 Biological intent stated (explicit life-science task/domain).
-  A2 Operations on biological data described
-  A3 Software with biological data I/O: 0 = none; 0.5 = only generic; 1 = concrete datatypes/formats named.
-  A4 Modality explicitly classifiable as one or more of: database portal, desktop application, web application, web API, web service, SPARQL endpoint, command-line tool (CLI), workbench, suite, plug-in, workflow, library, ontology. Include minimal usage context.
-  A5 Evidence of bio use (examples on real bio data OR peer-reviewed/benchmark citation).
+  • 1 = explicit bio intent named (e.g., variant calling, single-cell clustering, protein ID).
+  • 0.5 = biology is mentioned but task/domain is vague.
+  • 0 = no clear life-science intent.
+
+  A2 Operations on biological data described.
+  • 1 = concrete bio data operations or pipelines are described (e.g., align FASTQ to reference; identify peptides from mzML).
+  • 0.5 = claims to process biological data but lacks concrete steps.
+  • 0 = no operational description.
+
+  A3 Software with biological data I/O:
+  • 1 = concrete datatypes/formats or endpoints named (e.g., FASTQ/BAM/VCF/GFF/GTF/BED; mzML/mzIdentML/mzTab/MGF/Thermo RAW; PDB/mmCIF; h5ad/loom/MTX/Seurat; REST endpoints/OpenAPI).
+  • 0.5 = only generic “data/files/CSV” mentions.
+  • 0 = none.
+
+  A4 Modality explicitly classifiable as one or more of: database portal, desktop application, web application, web API, web service, SPARQL endpoint, command-line tool (CLI), workbench, suite, plug-in, workflow, library.
+  • 1 = modality named AND minimal usage/access context shown (e.g., command example, URL path for API, “conda install …” then tool subcommand).
+  • 0.5 = modality named but no concrete access/usage context.
+  • 0 = not classifiable.
+
+  A5 Evidence of bio use (real-data examples or peer-reviewed/benchmark citation).
+  • 1 = at least one peer-reviewed citation (DOI/PMID/PMCID in publication_ids/abstract/full_text) OR an example/benchmark explicitly using biological data.
+  • 0.5 = claimed evaluation without clear citation or example.
+  • 0 = none.
 
   Documentation score rubric (subcriteria only; no overall score here)
-  B1 Documentation completeness (e.g. manual, guide, readthedocs).
-  B2 Installation pathways (e.g. installation/setup, config, container, package).
-  B3 Reproducibility aids (e.g. doi, release).
-  B4 Maintenance signal (e.g. commits, issue tracker, news).
-  B5 Onboarding & support (e.g. quickstart/tutorial, contact, faq).
+  B1 Documentation completeness — presence of a user-oriented guide (docs/manual/tutorial/how-to/usage/walkthrough) or Usage:/--help.
+  • 1 = two or more independent artifacts (e.g., docs site + README usage section).
+  • 0.5 = exactly one concrete artifact.
+  • 0 = only keywords/hints or nothing.
+
+  B2 Installation pathways — package managers (pip/conda/bioconda/Bioconductor/CRAN/brew/apt) or containers (Docker/Singularity/Apptainer/BioContainers) or reproducible environment files.
+  • 1 = two or more independent install options (e.g., Bioconda + Docker).
+  • 0.5 = exactly one concrete install/container instruction.
+  • 0 = none or keyword-only.
+
+  B3 Reproducibility aids — versioned releases/tags/changelog/DOI and/or explicit, copyable commands/workflows or test data.
+  • 1 = versioning artifact (release/tag/DOI/changelog) AND one additional reproducibility artifact (e.g., exact commands/test data).
+  • 0.5 = exactly one qualifying artifact.
+  • 0 = none.
+
+  B4 Maintenance signal — evidence of maintenance or support channels (recent release/commit ≤ 3 years, active issues/roadmap/news).
+  • 1 = recent activity plus a support channel (issues/discussions/roadmap).
+  • 0.5 = either recent activity or a support channel, but not both.
+  • 0 = none.
+
+  B5 Onboarding & support — FAQ/troubleshooting/contact/community/contributing/code of conduct.
+  • 1 = two or more distinct onboarding/support artifacts.
+  • 0.5 = exactly one.
+  • 0 = none.
 
   Selection/normalization rules:
 
-  Treat unreachable homepages (status ≥ 400 or any homepage_error text) as missing documentation and score every documentation subcriterion 0.
-  Documentation links and keywords listed above are rubric-aligned evidence sources. Interpret them as:
-  • Installation pathways (B2): presence of urls or keywords such as install, installation, package, pip, conda, workflow → award ≥0.5; reach 1.0 when both keyword and explicit link are provided.
-  • Reproducibility aids (B3): release, version, tag, news, changelog in links/keywords → award ≥0.5; raise to 1.0 when multiple supporting signals exist.
-  • Maintenance signal (B4): commit, issues, activity, support, community, workflow → award ≥0.5; raise to 1.0 if both keyword and corresponding link (e.g. commits page) are present.
-  • Documentation completeness & onboarding (B1/B5): doc, docs, documentation, guide, manual, usage, faq, contact → award ≥0.5; raise to 1.0 when links confirm comprehensive material.
-  Explicitly cite the supporting keyword or link as "keyword evidence" when scoring.
-  Tags listed above are likewise extracted hints from the same external sources; cite them as "keyword evidence" when relevant but do not infer new facts beyond what is stated.
-  Normalize publication identifiers to prefixes: DOI:..., PMID:..., PMCID:... and remove duplicates (case-insensitive).
-  For any subcriterion scored 0 due to missing evidence, mention "insufficient evidence: <item>" in the rationale.
-  Record each bio subcriterion as numbers {{0,0.5,1}} in `bio_subscores` and each documentation subcriterion as numbers {{0,0.5,1}} in `documentation_subscores`.
-  Provide `confidence_score` as a number between 0 and 1 summarizing how certain you are about the overall assessment (higher means more confident in the decision).
+  • Treat unreachable homepages (status ≥ 400 or any homepage_error text) as missing documentation and score every documentation subcriterion 0.
+  • Award 0.5 in any documentation subscore only when you can point to a specific artifact tied to one of the scraped keywords above (explicit URL/title/section, file path, quoted instruction, or repository section). Keyword hints alone score 0 and must be cited as "insufficient evidence: <keyword>" if no corroborating artifact exists.
+  • Award 1.0 in a documentation subscore only when two or more independent artifacts support that criterion. “Independent” means different sources or sections (e.g., docs site vs README; release page vs Zenodo DOI; Docker registry vs Bioconda).
+  • Tags and documentation keywords are extracted hints; cite them as "keyword evidence" when they support an explicit artifact that matches the scraped keyword list, but do not fabricate details beyond what is stated.
+  • Leverage the publication abstract and publication full text fields to substantiate life-science scope, software modality, evidence of bio use, and documentation artifacts. Cite them explicitly as "abstract" or "full_text" in the rationale, and only award documentation credit from these sources when they contain concrete actionable statements (e.g., installation steps, usage walkthroughs, named manuals).
+  • Normalize publication identifiers to prefixes: DOI:..., PMID:..., PMCID:... and remove duplicates (case-insensitive).
+  • For any subcriterion scored 0 due to missing evidence, mention "insufficient evidence: <item>" in the rationale.
+  • Negative cues (dataset/benchmark-only, portal/KB without tool interface, review/survey/manuscript only, ontology/spec only, course/tutorial only) should push A4/B2/B1 toward 0 unless a runnable interface or install path is explicitly evidenced.
+
+  Rationale requirements:
+  • When any gating failure forces zeroed scores, start the rationale with "Rejected as bio.tools candidate because ..." and describe the failing gate.
+  • For accepted resources (expected to exceed the 0.5 downstream thresholds), highlight at least two distinct documentation artifacts (e.g., "Bioconda install" and "Docker image") and the key biological use evidence (format/task or citation). Downgrade confidence to ≤ 0.7 if fewer than two artifacts are confirmed, even if other scores are high.
+
   Confidence calibration guidelines (adjust intermediate values as needed):
-  - 0.9–1.0 only when every applicable subcriterion is fully satisfied with explicit evidence cited from multiple sources (homepage, documentation, repository, publications).
-  - 0.6–0.8 when most evidence is strong but one or two subcriteria rely on weaker hints or inferred signals; call out the weaker areas in the rationale.
-  - 0.3–0.5 when evidence is mixed, incomplete, or primarily keyword-level with limited direct verification.
-  - 0.0–0.2 when information is insufficient, conflicting, or lacks primary sources—explicitly note "insufficient evidence" items in the rationale.
-  Do not default to 0.9; calibrate confidence to reflect the overall strength and completeness of the cited evidence.
+
+  0.9–1.0 only when every applicable subcriterion is fully satisfied with explicit evidence from multiple sources (homepage, documentation, repository, publications) and documentation subscores are supported by two or more artifacts each.
+
+  0.6–0.8 when most evidence is strong but one or two subcriteria rely on single artifacts or weaker hints; call out the weaker areas in the rationale.
+
+  0.3–0.5 when evidence is mixed, incomplete, or primarily keyword-level with limited direct verification.
+
+  0.0–0.2 when information is insufficient, conflicting, or lacks primary sources—explicitly note "insufficient evidence" items in the rationale.
+
+  Confidence must be ≤ 0.5 whenever any documentation subscore relies solely on keyword evidence or the homepage is unreachable.
+
   Do NOT compute aggregate scores; only fill the provided fields.
   Do not output any value outside [0.0, 1.0].
   Always emit every field in the output JSON exactly once.
   Emit ONLY the fields in the schema below. Use "" for unknown strings and [] if no publication identifiers are found. Do not output booleans/strings instead of numbers.
+
+  JSON schema describing the required output:
+  {json_schema}
+
+  Before replying, validate your draft against this schema. If the JSON does not pass validation, fix it and revalidate until it does. Output only the validated JSON; never include commentary or surrounding text.
 
   Output: respond ONLY with a single JSON object shaped as:
   {{

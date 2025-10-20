@@ -13,7 +13,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -284,12 +284,37 @@ def simple_scores(c: dict[str, Any]) -> dict[str, Any]:
             for k in ["genomics", "bioinformatics", "proteomics", "metabolomics"]
         )
     )
+    homepage = primary_homepage(urls)
+    has_homepage = homepage is not None
     bio = 0.8 if bio_kw else 0.4
-    docs = 0.8 if primary_homepage(urls) else 0.1
+    docs = 0.8 if has_homepage else 0.1
     confidence = 0.6 if docs >= 0.5 else 0.3
+    bio_subscores = {
+        "A1": 1.0 if bio_kw else 0.0,
+        "A2": 0.5 if bio_kw else 0.0,
+        "A3": 0.5 if bio_kw else 0.0,
+        "A4": 1.0 if has_homepage else 0.0,
+        "A5": 0.5 if bio_kw else 0.0,
+    }
+    if not bio_kw:
+        bio_subscores = {key: 0.0 for key in ("A1", "A2", "A3", "A4", "A5")}
+
+    if has_homepage:
+        doc_subscores = {
+            "B1": 1.0,
+            "B2": 1.0,
+            "B3": 0.5,
+            "B4": 0.5,
+            "B5": 0.5,
+        }
+    else:
+        doc_subscores = {key: 0.0 for key in ("B1", "B2", "B3", "B4", "B5")}
+
     return {
         "bio_score": max(0.0, min(1.0, float(bio))),
+        "bio_subscores": bio_subscores,
         "documentation_score": max(0.0, min(1.0, float(docs))),
+        "documentation_subscores": doc_subscores,
         "concise_description": (c.get("description") or "").strip()[:280],
         "rationale": "heuristic pre-LLM scoring",
         "confidence_score": confidence,
@@ -401,6 +426,14 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
                 origin_types_str = str(origin_types_value)
             else:
                 origin_types_str = ""
+            decision_value = row.get("include")
+            if isinstance(decision_value, bool):
+                decision_str = "add" if decision_value else "do_not_add"
+            elif decision_value is None:
+                decision_str = ""
+            else:
+                decision_str = str(decision_value)
+
             writer.writerow(
                 {
                     "id": row.get("id", ""),
@@ -410,7 +443,7 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
                     "homepage_status": row.get("homepage_status", ""),
                     "homepage_error": row.get("homepage_error", ""),
                     "publication_ids": publication_ids_str,
-                    "include": row.get("include", False),
+                    "include": decision_str,
                     "in_biotools_name": (
                         "" if name_registry_value is None else name_registry_value
                     ),
@@ -437,19 +470,102 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
                 }
             )
 
+DecisionCategory = Literal["add", "review", "do_not_add"]
 
-def include_candidate(
+
+def _coerce_unit_score(value: Any) -> float:
+    try:
+        if value is None:
+            return 0.0
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if result < 0.0:
+        return 0.0
+    if result > 1.0:
+        return 1.0
+    return result
+
+
+def _apply_doc_score_v2(scores: dict[str, Any]) -> float:
+    weights = {"B1": 2.0, "B2": 1.0, "B3": 1.0, "B4": 1.0, "B5": 2.0}
+    denominator = sum(weights.values())
+    documentation_subscores = scores.get("documentation_subscores")
+    have_any_subscores = False
+    numerator = 0.0
+
+    if isinstance(documentation_subscores, dict):
+        for key, weight in weights.items():
+            value = _coerce_unit_score(documentation_subscores.get(key))
+            numerator += value * weight
+            if documentation_subscores.get(key) is not None:
+                have_any_subscores = True
+
+    doc_score_v2: float
+    if have_any_subscores:
+        doc_score_v2 = numerator / denominator
+    else:
+        doc_score_v2 = _coerce_unit_score(scores.get("documentation_score"))
+
+    existing_score = scores.get("documentation_score")
+    if (
+        existing_score is not None
+        and "documentation_score_raw" not in scores
+        and existing_score != doc_score_v2
+    ):
+        scores["documentation_score_raw"] = existing_score
+
+    scores["doc_score_v2"] = doc_score_v2
+    scores["documentation_score"] = doc_score_v2
+    return doc_score_v2
+
+
+def classify_candidate(
     scores: dict[str, Any],
     *,
-    min_bio_score: float,
-    min_doc_score: float,
+    bio_thresholds: tuple[float, float],
+    doc_thresholds: tuple[float, float],
     has_homepage: bool,
-) -> bool:
-    return (
-        scores.get("bio_score", 0.0) >= min_bio_score
-        and scores.get("documentation_score", 0.0) >= min_doc_score
-        and has_homepage
-    )
+) -> DecisionCategory:
+    _apply_doc_score_v2(scores)
+
+    if not has_homepage:
+        return "do_not_add"
+
+    bio_score = _coerce_unit_score(scores.get("bio_score"))
+    doc_score_v2 = _coerce_unit_score(scores.get("documentation_score"))
+
+    review_bio, add_bio = bio_thresholds
+    review_doc, add_doc = doc_thresholds
+
+    bio_add_threshold = max(add_bio, 0.75)
+    bio_review_threshold = max(review_bio, min(bio_add_threshold, 0.6))
+    doc_add_threshold = max(add_doc, 0.40)
+    doc_review_threshold = max(review_doc, 0.30)
+
+    documentation_subscores = scores.get("documentation_subscores")
+    if not isinstance(documentation_subscores, dict):
+        documentation_subscores = {}
+    bio_subscores = scores.get("bio_subscores")
+    if not isinstance(bio_subscores, dict):
+        bio_subscores = {}
+
+    b2 = _coerce_unit_score(documentation_subscores.get("B2"))
+    b3 = _coerce_unit_score(documentation_subscores.get("B3"))
+    a4 = _coerce_unit_score(bio_subscores.get("A4"))
+
+    has_execution_path = b2 >= 0.5 or a4 >= 0.99
+    has_repro_anchor = b3 >= 0.5
+
+    if bio_score >= bio_add_threshold and doc_score_v2 >= doc_add_threshold:
+        if has_execution_path and has_repro_anchor:
+            return "add"
+        return "review"
+
+    if bio_score >= bio_review_threshold and doc_score_v2 >= doc_review_threshold:
+        return "review"
+
+    return "do_not_add"
 
 
 def _parse_status_code(value: Any) -> int | None:
@@ -974,8 +1090,8 @@ def _resolve_homepage(
 def execute_run(
     from_date: str | None = None,
     to_date: str | None = None,
-    min_bio_score: float = 0.6,
-    min_doc_score: float = 0.6,
+    bio_thresholds: tuple[float, float] = (0.5, 0.6),
+    doc_thresholds: tuple[float, float] = (0.5, 0.6),
     limit: int | None = None,
     dry_run: bool = False,
     output: Path | None = None,
@@ -1016,6 +1132,22 @@ def execute_run(
 
         config_data = get_config_yaml()
     total_steps = 5
+
+    bio_review_threshold, bio_add_threshold = bio_thresholds
+    doc_review_threshold, doc_add_threshold = doc_thresholds
+
+    bio_review_threshold = max(0.0, min(bio_review_threshold, 1.0))
+    bio_add_threshold = max(0.0, min(bio_add_threshold, 1.0))
+    doc_review_threshold = max(0.0, min(doc_review_threshold, 1.0))
+    doc_add_threshold = max(0.0, min(doc_add_threshold, 1.0))
+
+    if bio_review_threshold > bio_add_threshold:
+        bio_review_threshold = bio_add_threshold
+    if doc_review_threshold > doc_add_threshold:
+        doc_review_threshold = doc_add_threshold
+
+    bio_thresholds = (bio_review_threshold, bio_add_threshold)
+    doc_thresholds = (doc_review_threshold, doc_add_threshold)
 
     progress_mode_env_raw = os.environ.get("BIOTOOLS_PROGRESS", "").strip().lower()
     mode = progress_mode_env_raw or "auto"
@@ -1304,9 +1436,11 @@ def execute_run(
             f"   📅 Pub2Tools fetch range: {fetch_from_label} to {to_date or 'now'}"
         )
         logger.info(
-            "   🎯 Min scores → bio: %s, documentation: %s, Limit: %s",
-            f"{min_bio_score:.2f}",
-            f"{min_doc_score:.2f}",
+            "   🎯 Thresholds → bio(add/review): %s/%s, docs(add/review): %s/%s, Limit: %s",
+            f"{bio_add_threshold:.2f}",
+            f"{bio_review_threshold:.2f}",
+            f"{doc_add_threshold:.2f}",
+            f"{doc_review_threshold:.2f}",
             limit or "unlimited",
         )
         logger.info(f"   📊 Output: {output}, Report: {report}")
@@ -1683,9 +1817,10 @@ def execute_run(
                 logger.info("ENRICH Europe PMC skipped – disabled in config")
                 set_status(2, "ENRICH – Europe PMC skipped (disabled)")
 
-        payload: list[dict[str, Any]] = []
+        payload_add: list[dict[str, Any]] = []
+        payload_review: list[dict[str, Any]] = []
         report_rows: list[dict[str, Any]] = []
-        accepted_records: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+        add_records: list[tuple[dict[str, Any], dict[str, Any], str]] = []
 
         logger.info(
             step_msg(
@@ -1710,7 +1845,8 @@ def execute_run(
         score_fallbacks = {"llm": 0, "health": 0}
         score_duration = 0.0
         total_scored = 0
-        accepted_count = 0
+        add_count = 0
+        review_count = 0
         rejected_count = 0
 
         if scoring_resumed:
@@ -1728,53 +1864,55 @@ def execute_run(
                 homepage_status = row.get("homepage_status")
                 homepage_error = row.get("homepage_error")
                 candidate = _match_candidate_from_report(row, by_id, by_title)
+
+                if candidate is not None:
+                    urls = [str(u) for u in (candidate.get("urls") or [])]
+                    if not homepage:
+                        homepage = (
+                            candidate.get("homepage")
+                            or primary_homepage(urls)
+                            or ""
+                        )
+                    homepage_status = candidate.get("homepage_status", homepage_status)
+                    homepage_error = candidate.get("homepage_error", homepage_error)
+                homepage_ok = _homepage_is_usable(
+                    homepage, homepage_status, homepage_error
+                )
+                _apply_documentation_penalty(scores, homepage_ok)
+                decision_value = classify_candidate(
+                    scores,
+                    bio_thresholds=bio_thresholds,
+                    doc_thresholds=doc_thresholds,
+                    has_homepage=homepage_ok,
+                )
+
+                row["homepage"] = homepage
+                row["homepage_status"] = homepage_status
+                row["homepage_error"] = homepage_error
+                row["include"] = decision_value
+                row["decision"] = decision_value
+
                 if candidate is None:
-                    homepage_ok = _homepage_is_usable(
-                        homepage, homepage_status, homepage_error
-                    )
-                    _apply_documentation_penalty(scores, homepage_ok)
-                    include = include_candidate(
-                        scores,
-                        min_bio_score=min_bio_score,
-                        min_doc_score=min_doc_score,
-                        has_homepage=homepage_ok,
-                    )
-                    row["homepage_status"] = homepage_status
-                    row["homepage_error"] = homepage_error
-                    row["include"] = include
                     row.setdefault("in_biotools", None)
                     row.setdefault("in_biotools_name", None)
                     unmatched_report_rows += 1
                     report_rows.append(row)
                     continue
-                urls = [str(u) for u in (candidate.get("urls") or [])]
-                if not homepage:
-                    homepage = candidate.get("homepage") or primary_homepage(urls) or ""
-                homepage_status = candidate.get("homepage_status", homepage_status)
-                homepage_error = candidate.get("homepage_error", homepage_error)
-                homepage_ok = _homepage_is_usable(
-                    homepage, homepage_status, homepage_error
-                )
-                _apply_documentation_penalty(scores, homepage_ok)
-                include = include_candidate(
-                    scores,
-                    min_bio_score=min_bio_score,
-                    min_doc_score=min_doc_score,
-                    has_homepage=homepage_ok,
-                )
-                row["homepage"] = homepage
-                row["homepage_status"] = homepage_status
-                row["homepage_error"] = homepage_error
-                row["include"] = include
+
                 row["in_biotools"] = candidate.get("in_biotools")
                 row["in_biotools_name"] = candidate.get("in_biotools_name")
                 report_rows.append(row)
-                if include:
-                    payload.append(to_entry(candidate, homepage))
-                    accepted_records.append((candidate, scores, homepage))
+
+                if decision_value == "add":
+                    payload_add.append(to_entry(candidate, homepage))
+                    add_records.append((candidate, scores, homepage))
+                elif decision_value == "review":
+                    payload_review.append(to_entry(candidate, homepage))
+
             total_scored = len(report_rows)
-            accepted_count = len(accepted_records)
-            rejected_count = max(total_scored - accepted_count, 0)
+            add_count = len(payload_add)
+            review_count = len(payload_review)
+            rejected_count = max(total_scored - add_count - review_count, 0)
             score_duration = 0.0
             if unmatched_report_rows:
                 logger.warning(
@@ -1782,19 +1920,63 @@ def execute_run(
                     unmatched_report_rows,
                 )
             logger.info(
-                "RESUME scoring reused %d decisions (%d accepted, %d rejected)",
+                "RESUME scoring reused %d decisions (%d add, %d review, %d do-not-add)",
                 total_scored,
-                accepted_count,
+                add_count,
+                review_count,
                 rejected_count,
             )
             set_status(
                 3,
-                f"SCORE – reused cached assessment ({accepted_count} accepted, {rejected_count} rejected)",
+                f"SCORE – reused cached assessment ({add_count} add, {review_count} review, {rejected_count} do-not-add)",
                 clear_progress=True,
             )
             logger.info("TIMING score_elapsed_seconds=%.3f", score_duration)
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _decision_payload(
+                candidate: dict[str, Any],
+                scores: dict[str, Any],
+                homepage: str,
+                homepage_status: Any,
+                homepage_error: Any,
+                publication_ids: list[str] | None,
+                homepage_ok: bool,
+            ) -> tuple[dict[str, Any], DecisionCategory]:
+                decision_value = classify_candidate(
+                    scores,
+                    bio_thresholds=bio_thresholds,
+                    doc_thresholds=doc_thresholds,
+                    has_homepage=homepage_ok,
+                )
+                decision_row = {
+                    "id": str(
+                        candidate.get("id")
+                        or candidate.get("tool_id")
+                        or candidate.get("biotools_id")
+                        or candidate.get("biotoolsID")
+                        or candidate.get("identifier")
+                        or ""
+                    ),
+                    "title": str(
+                        candidate.get("title")
+                        or candidate.get("name")
+                        or candidate.get("tool_title")
+                        or candidate.get("display_title")
+                        or ""
+                    ),
+                    "homepage": homepage,
+                    "homepage_status": homepage_status,
+                    "homepage_error": homepage_error,
+                    "publication_ids": publication_ids or [],
+                    "scores": scores,
+                    "include": decision_value,
+                    "decision": decision_value,
+                    "in_biotools": candidate.get("in_biotools"),
+                    "in_biotools_name": candidate.get("in_biotools_name"),
+                }
+                return decision_row, decision_value
 
             def heuristic_score_one(c: dict[str, Any]):
                 homepage, homepage_reason = _resolve_scoring_homepage(c)
@@ -1802,57 +1984,20 @@ def execute_run(
                     zero_scores = _zero_score_payload(
                         c, homepage=homepage, reason=homepage_reason
                     )
-                    include = include_candidate(
+                    decision_row, decision_value = _decision_payload(
+                        c,
                         zero_scores,
-                        min_bio_score=min_bio_score,
-                        min_doc_score=min_doc_score,
-                        has_homepage=False,
+                        homepage,
+                        c.get("homepage_status"),
+                        c.get("homepage_error"),
+                        zero_scores.get("publication_ids", []),
+                        False,
                     )
-                    decision = {
-                        "id": str(
-                            c.get("id")
-                            or c.get("tool_id")
-                            or c.get("biotools_id")
-                            or c.get("biotoolsID")
-                            or c.get("identifier")
-                            or ""
-                        ),
-                        "title": str(
-                            c.get("title")
-                            or c.get("name")
-                            or c.get("tool_title")
-                            or c.get("display_title")
-                            or ""
-                        ),
-                        "homepage": homepage,
-                        "homepage_status": c.get("homepage_status"),
-                        "homepage_error": c.get("homepage_error"),
-                        "publication_ids": zero_scores.get("publication_ids", []),
-                        "scores": zero_scores,
-                        "include": include,
-                        "in_biotools": c.get("in_biotools"),
-                        "in_biotools_name": c.get("in_biotools_name"),
-                    }
-                    return (decision, c, homepage, include)
+                    return decision_row, c, homepage, decision_value
 
                 publication_ids = _publication_identifiers(c)
                 if publication_ids:
                     c.setdefault("publication_ids", publication_ids)
-                candidate_id = (
-                    c.get("id")
-                    or c.get("tool_id")
-                    or c.get("biotools_id")
-                    or c.get("biotoolsID")
-                    or c.get("identifier")
-                    or ""
-                )
-                title = (
-                    c.get("title")
-                    or c.get("name")
-                    or c.get("tool_title")
-                    or c.get("display_title")
-                    or ""
-                )
                 scores = simple_scores(c)
                 scores.setdefault("model", "heuristic")
                 homepage_status = c.get("homepage_status")
@@ -1861,25 +2006,16 @@ def execute_run(
                     homepage, homepage_status, homepage_error
                 )
                 _apply_documentation_penalty(scores, homepage_ok)
-                include = include_candidate(
+                decision_row, decision_value = _decision_payload(
+                    c,
                     scores,
-                    min_bio_score=min_bio_score,
-                    min_doc_score=min_doc_score,
-                    has_homepage=homepage_ok,
+                    homepage,
+                    homepage_status,
+                    homepage_error,
+                    publication_ids,
+                    homepage_ok,
                 )
-                decision = {
-                    "id": str(candidate_id),
-                    "title": str(title),
-                    "homepage": homepage,
-                    "homepage_status": homepage_status,
-                    "homepage_error": homepage_error,
-                    "publication_ids": publication_ids,
-                    "scores": scores,
-                    "include": include,
-                    "in_biotools": c.get("in_biotools"),
-                    "in_biotools_name": c.get("in_biotools_name"),
-                }
-                return (decision, c, homepage, include)
+                return decision_row, c, homepage, decision_value
 
             use_llm = not offline
             scorer = None
@@ -1906,75 +2042,41 @@ def execute_run(
                 if offline and total_candidates:
                     set_status(3, "SCORE – heuristic scoring (offline mode)")
 
-                def score_one(c):
+                def score_one(c: dict[str, Any]):
                     return heuristic_score_one(c)
 
             else:
 
-                def score_one(c):
+                def score_one(c: dict[str, Any]):
                     homepage, homepage_reason = _resolve_scoring_homepage(c)
                     if homepage_reason:
                         zero_scores = _zero_score_payload(
                             c, homepage=homepage, reason=homepage_reason
                         )
-                        include = include_candidate(
+                        decision_row, decision_value = _decision_payload(
+                            c,
                             zero_scores,
-                            min_bio_score=min_bio_score,
-                            min_doc_score=min_doc_score,
-                            has_homepage=False,
+                            homepage,
+                            c.get("homepage_status"),
+                            c.get("homepage_error"),
+                            zero_scores.get("publication_ids", []),
+                            False,
                         )
-                        decision = {
-                            "id": str(
-                                c.get("id")
-                                or c.get("tool_id")
-                                or c.get("biotools_id")
-                                or c.get("biotoolsID")
-                                or c.get("identifier")
-                                or ""
-                            ),
-                            "title": str(
-                                c.get("title")
-                                or c.get("name")
-                                or c.get("tool_title")
-                                or c.get("display_title")
-                                or ""
-                            ),
-                            "homepage": homepage,
-                            "homepage_status": c.get("homepage_status"),
-                            "homepage_error": c.get("homepage_error"),
-                            "publication_ids": zero_scores.get("publication_ids", []),
-                            "scores": zero_scores,
-                            "include": include,
-                            "in_biotools": c.get("in_biotools"),
-                            "in_biotools_name": c.get("in_biotools_name"),
-                        }
-                        return (decision, c, homepage, include)
+                        return decision_row, c, homepage, decision_value
 
                     publication_ids = _publication_identifiers(c)
                     if publication_ids:
                         c.setdefault("publication_ids", publication_ids)
-                    candidate_id = (
-                        c.get("id")
-                        or c.get("tool_id")
-                        or c.get("biotools_id")
-                        or c.get("biotoolsID")
-                        or c.get("identifier")
-                        or ""
-                    )
-                    title = (
-                        c.get("title")
-                        or c.get("name")
-                        or c.get("tool_title")
-                        or c.get("display_title")
-                        or ""
-                    )
                     try:
                         scores = scorer.score_candidate(c)
                     except Exception as exc:
                         score_fallbacks["llm"] += 1
                         logger.warning(
                             "LLM scoring failed for '%s': %s. Using heuristic backup; rerun with --offline or check Ollama service.",
-                            title or candidate_id or "<unknown>",
+                            c.get("title")
+                            or c.get("name")
+                            or c.get("id")
+                            or "<unknown>",
                             exc,
                         )
                         set_status(
@@ -1987,25 +2089,16 @@ def execute_run(
                         homepage, homepage_status, homepage_error
                     )
                     _apply_documentation_penalty(scores, homepage_ok)
-                    include = include_candidate(
+                    decision_row, decision_value = _decision_payload(
+                        c,
                         scores,
-                        min_bio_score=min_bio_score,
-                        min_doc_score=min_doc_score,
-                        has_homepage=homepage_ok,
+                        homepage,
+                        homepage_status,
+                        homepage_error,
+                        publication_ids,
+                        homepage_ok,
                     )
-                    decision = {
-                        "id": str(candidate_id),
-                        "title": str(title),
-                        "homepage": homepage,
-                        "homepage_status": homepage_status,
-                        "homepage_error": homepage_error,
-                        "publication_ids": publication_ids,
-                        "scores": scores,
-                        "include": include,
-                        "in_biotools": c.get("in_biotools"),
-                        "in_biotools_name": c.get("in_biotools_name"),
-                    }
-                    return (decision, c, homepage, include)
+                    return decision_row, c, homepage, decision_value
 
             score_start = perf_counter()
             try:
@@ -2015,17 +2108,17 @@ def execute_run(
                     with ThreadPoolExecutor(max_workers=concurrency) as executor:
                         futures = [executor.submit(score_one, c) for c in candidates]
                         for fut in as_completed(futures):
-                            decision, c, homepage, include = fut.result()
+                            decision_row, cand, homepage, decision_value = fut.result()
                             processed += 1
-                            report_rows.append(decision)
-                            scores = decision.get("scores", {})
+                            report_rows.append(decision_row)
+                            scores = decision_row.get("scores", {})
                             if (
                                 scores.get("model")
                                 and scores.get("model") != "heuristic"
                             ):
                                 summary_name = (
-                                    decision.get("title")
-                                    or decision.get("id")
+                                    decision_row.get("title")
+                                    or decision_row.get("id")
                                     or "<unknown>"
                                 )
                                 attempts = scores.get("model_params", {}).get(
@@ -2053,9 +2146,11 @@ def execute_run(
                                     bio_display,
                                     doc_display,
                                 )
-                            if include:
-                                payload.append(to_entry(c, homepage))
-                                accepted_records.append((c, scores, homepage))
+                            if decision_value == "add":
+                                payload_add.append(to_entry(cand, homepage))
+                                add_records.append((cand, scores, homepage))
+                            elif decision_value == "review":
+                                payload_review.append(to_entry(cand, homepage))
                             update_progress(3, processed, total_candidates)
                             if (
                                 processed % update_interval == 0
@@ -2070,13 +2165,15 @@ def execute_run(
             finally:
                 score_duration = perf_counter() - score_start
 
-            accepted_count = len(accepted_records)
-            total_scored = len(candidates)
-            rejected_count = max(total_scored - accepted_count, 0)
+            total_scored = len(report_rows)
+            add_count = len(payload_add)
+            review_count = len(payload_review)
+            rejected_count = max(total_scored - add_count - review_count, 0)
             logger.info(
-                "SUMMARY score=%d accepted=%d rejected=%d llm_fallbacks=%d llm_health_fail=%d duration=%.2fs",
+                "SUMMARY score=%d add=%d review=%d do-not-add=%d llm_fallbacks=%d llm_health_fail=%d duration=%.2fs",
                 total_scored,
-                accepted_count,
+                add_count,
+                review_count,
                 rejected_count,
                 score_fallbacks.get("llm", 0),
                 score_fallbacks.get("health", 0),
@@ -2085,7 +2182,7 @@ def execute_run(
             logger.info("TIMING score_elapsed_seconds=%.3f", score_duration)
             set_status(
                 3,
-                f"SCORE – complete in {score_duration:.1f}s ({accepted_count} accepted, {rejected_count} rejected)",
+                f"SCORE – complete in {score_duration:.1f}s ({add_count} add, {review_count} review, {rejected_count} do-not-add)",
                 clear_progress=True,
             )
 
@@ -2097,28 +2194,41 @@ def execute_run(
         logger.info(f"📝 Writing CSV report to {report_csv}")
         write_report_csv(report_csv, report_rows)
 
-        payload = [_strip_null_fields(entry) for entry in payload]
+        payload_add = [_strip_null_fields(entry) for entry in payload_add]
+        payload_review = [_strip_null_fields(entry) for entry in payload_review]
 
         invalids = []
-        for entry in payload:
-            try:
-                BioToolsEntry(**entry)
-            except Exception as e:
-                invalids.append({"entry": entry, "error": str(e)})
+        for category, entries in (("add", payload_add), ("review", payload_review)):
+            for entry in entries:
+                try:
+                    BioToolsEntry(**entry)
+                except Exception as e:
+                    invalids.append(
+                        {"entry": entry, "error": str(e), "category": category}
+                    )
 
         if not dry_run:
-            logger.info(f"OUTPUT payload -> {output}")
-            set_status(4, "OUTPUT – writing payload")
-            write_json(output, payload)
+            if "payload" in output.stem:
+                review_stem = output.stem.replace("payload", "review_payload")
+            else:
+                review_stem = f"{output.stem}_review"
+            output_review = output.with_name(f"{review_stem}{output.suffix}")
+
+            logger.info(f"OUTPUT add payload -> {output}")
+            set_status(4, "OUTPUT – writing payloads")
+            write_json(output, payload_add)
+            logger.info(f"OUTPUT review payload -> {output_review}")
+            write_json(output_review, payload_review)
+
             updated_path = updated_entries or output.with_name("biotools_entries.json")
             write_updated_entries(
-                accepted_records,
+                add_records,
                 updated_path,
                 config_data=config_data,
                 logger=logger,
             )
         else:
-            set_status(4, "OUTPUT – dry-run (payload skipped)")
+            set_status(4, "OUTPUT – dry-run (payloads skipped)")
 
         if invalids:
             logger.error(

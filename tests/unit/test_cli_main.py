@@ -6,7 +6,9 @@ from pathlib import Path
 import yaml
 from typer.testing import CliRunner
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src"))
+)
 
 # Ensure we import the in-repo CLI implementation even if an older installed
 # package version was loaded earlier during the pytest session.
@@ -27,7 +29,9 @@ def test_conflicting_resume_and_input_exits_with_message(tmp_path):
     pipeline_cfg["resume_from_scoring"] = False
 
     config_path = Path(tmp_path) / "config.yaml"
-    config_path.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+    config_path.write_text(
+        yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8"
+    )
 
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(config_path)])

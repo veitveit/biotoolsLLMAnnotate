@@ -39,6 +39,71 @@ def test_extract_metadata_supports_additional_repo_hosts() -> None:
         assert meta.get("repository") == url
 
 
+def test_extract_metadata_ignores_repository_navigation_noise() -> None:
+    """Repository nav links should not inflate documentation evidence."""
+    from biotoolsllmannotate.enrich import scraper
+
+    html = """
+        <html>
+            <body>
+                <header class="pagehead">
+                    <nav class="UnderlineNav">
+                        <a class="UnderlineNav-item" href="/org/tool">Code</a>
+                        <a class="UnderlineNav-item" href="/org/tool/issues">Issues</a>
+                        <a class="UnderlineNav-item" href="/org/tool/pulls">Pull requests</a>
+                        <a class="UnderlineNav-item" href="/org/tool/wiki">Wiki</a>
+                    </nav>
+                </header>
+                <div class="repository-content">
+                    <article>
+                        <a href="/org/tool/wiki/Getting-Started">Getting started guide</a>
+                        <a href="/org/tool/blob/main/README.md">Documentation</a>
+                    </article>
+                </div>
+            </body>
+        </html>
+        """
+    base = "https://github.com/org/tool"
+    meta = scraper.extract_metadata(html, base)
+
+    docs = meta.get("documentation") or []
+    assert all("issues" not in url for url in docs)
+    assert all("pull" not in url for url in docs)
+    assert any("Getting-Started" in url for url in docs)
+    assert meta.get("repository") == "https://github.com/org/tool"
+
+    keywords = set(meta.get("documentation_keywords") or [])
+    assert "issues" not in keywords
+    assert any(key in keywords for key in ("getting started", "documentation"))
+
+
+def test_extract_metadata_keeps_docs_inside_nav_when_relevant() -> None:
+    """Navigation containers with real doc links should still be captured."""
+    from biotoolsllmannotate.enrich import scraper
+
+    html = """
+        <html>
+            <body>
+                <nav class="site-nav">
+                    <a href="/documentation">Documentation</a>
+                </nav>
+                <main>
+                    <a href="/guides/getting-started">Getting Started Guide</a>
+                </main>
+            </body>
+        </html>
+        """
+    base = "https://docs.example.org/tool/"
+    meta = scraper.extract_metadata(html, base)
+
+    docs = meta.get("documentation") or []
+    assert any(url.endswith("/documentation") for url in docs)
+    assert any("getting-started" in url for url in docs)
+    keywords = set(meta.get("documentation_keywords") or [])
+    assert "documentation" in keywords
+    assert "getting started" in keywords
+
+
 def test_extract_metadata_with_tutorial_link() -> None:
     """Capture tutorial anchor tags as documentation."""
     from biotoolsllmannotate.enrich import scraper
@@ -64,6 +129,36 @@ def test_extract_metadata_with_install_keyword() -> None:
     meta = scraper.extract_metadata(html, base)
     assert any("/install" in u for u in meta.get("documentation", []))
     assert meta.get("documentation_keywords") == ["install", "pip install"]
+
+
+def test_extract_metadata_with_interface_keywords() -> None:
+    """Capture interface and usage keywords from anchor text."""
+    from biotoolsllmannotate.enrich import scraper
+
+    html = '<html><body><a href="/usage">Usage: CLI (--help)</a></body></html>'
+    base = "https://example.org/tool"
+    for keyword in ("usage:", "--help", "cli"):
+        assert keyword in scraper.DOCUMENTATION_KEYWORDS
+    meta = scraper.extract_metadata(html, base)
+    keywords = meta.get("documentation_keywords") or []
+    assert {"--help", "cli", "usage", "usage:"}.issubset(set(keywords))
+
+
+def test_extract_metadata_with_release_license_keywords() -> None:
+    """Detect release and license keywords in links."""
+    from biotoolsllmannotate.enrich import scraper
+
+    html = (
+        "<html><body>"
+        '<a href="/releases">Releases & License (MIT) tags</a>'
+        "</body></html>"
+    )
+    base = "https://example.org/tool"
+    for keyword in ("releases", "license", "mit"):
+        assert keyword in scraper.DOCUMENTATION_KEYWORDS
+    meta = scraper.extract_metadata(html, base)
+    keywords = meta.get("documentation_keywords") or []
+    assert {"license", "mit", "releases", "tags"}.issubset(set(keywords))
 
 
 def test_scrape_homepage_clears_stale_error() -> None:
@@ -107,7 +202,8 @@ def test_scrape_homepage_clears_stale_error() -> None:
     assert candidate.get("homepage_status") == 200
     assert "homepage_error" not in candidate
     assert candidate.get("homepage_scraped") is True
-    assert candidate.get("documentation_keywords") == ["doc", "documentation"]
+    keywords = candidate.get("documentation_keywords") or []
+    assert {"doc", "documentation"}.issubset(set(keywords))
 
 
 def test_scrape_homepage_removes_absent_keywords() -> None:

@@ -62,6 +62,7 @@ def test_score_candidate_clamps_and_returns_rationale():
         "B4": -1.0,
         "B5": -1.0,
     }
+    assert result["doc_score_v2"] == pytest.approx(0.0)
     assert isinstance(result.get("rationale"), str) and result["rationale"]
     assert result["concise_description"] == "Concise summary."
     assert result["origin_types"] == ["title", "description"]
@@ -102,7 +103,9 @@ def test_score_candidate_averages_subscores():
     assert result["tool_name"] == "LLM Tool"
     assert result["homepage"] == "https://provided.example"
     assert result["bio_score"] == pytest.approx(0.6)
-    assert result["documentation_score"] == pytest.approx(0.3)
+    assert result["documentation_score"] == pytest.approx(0.3571428571)
+    assert result["documentation_score_raw"] == pytest.approx(0.3)
+    assert result["doc_score_v2"] == pytest.approx(0.3571428571)
     assert result["bio_subscores"] == {
         "A1": 1.0,
         "A2": 0.5,

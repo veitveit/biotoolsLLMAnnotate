@@ -9,6 +9,7 @@ from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 from requests import exceptions as requests_exc
 from urllib.parse import urljoin, urlparse
 
@@ -127,6 +128,18 @@ DOCUMENTATION_KEYWORDS: tuple[str, ...] = (
     "start here",
     "first steps",
     "example workflow",
+    "usage:",
+    "--help",
+    "cli",
+    "gui",
+    "web app",
+    "rest api",
+    "openapi",
+    "swagger",
+    "galaxy",
+    "shiny",
+    "streamlit",
+    "gradio",
     # B2 – Installation pathways
     "install",
     "installation",
@@ -136,12 +149,22 @@ DOCUMENTATION_KEYWORDS: tuple[str, ...] = (
     "pip3 install",
     "conda install",
     "mamba install",
+    "bioconda",
+    "bioconductor",
+    "cran",
+    "brew install",
+    "apt-get install",
     "docker",
     "dockerfile",
+    "docker pull",
     "container",
     "singularity",
     "singularity recipe",
+    "apptainer",
     "podman",
+    "biocontainers",
+    "ghcr.io",
+    "quay.io",
     "requirements.txt",
     "environment.yml",
     "env.yaml",
@@ -155,12 +178,20 @@ DOCUMENTATION_KEYWORDS: tuple[str, ...] = (
     "release",
     "release date",
     "latest release",
+    "releases",
     "changelog",
+    "version",
     "version history",
     "tag",
     "git tag",
+    "tags",
     "doi",
     "zenodo",
+    "license",
+    "mit",
+    "gpl",
+    "apache",
+    "bsd",
     "archival",
     "workflow",
     "pipeline",
@@ -212,6 +243,129 @@ REPOSITORY_HOSTS: tuple[str, ...] = (
     "git.sr.ht",
     "launchpad.net",
 )
+
+_LAYOUT_PARENT_NAMES = {"nav", "header", "footer", "aside"}
+_LAYOUT_ATTR_KEYWORDS = (
+    "header",
+    "footer",
+    "nav",
+    "menu",
+    "breadcrumb",
+    "sidebar",
+    "toolbar",
+    "subnav",
+    "pagehead",
+    "repository-content-header",
+    "gh-header",
+    "site-footer",
+    "site-header",
+)
+
+_REPO_NAV_PATH_PREFIXES = (
+    "/issues",
+    "/pulls",
+    "/pull",
+    "/actions",
+    "/projects",
+    "/security",
+    "/discussions",
+    "/packages",
+    "/marketplace",
+    "/sponsors",
+    "/network",
+    "/graphs",
+    "/pulse",
+)
+
+_REPO_NAV_TEXT = {
+    "issues",
+    "pull requests",
+    "pull request",
+    "actions",
+    "security",
+    "projects",
+    "insights",
+    "code",
+    "sponsors",
+    "packages",
+    "discussions",
+    "marketplace",
+    "network",
+    "graphs",
+    "pulse",
+}
+
+
+def _iter_attribute_tokens(node: Tag) -> Iterable[str]:
+    for attr_name in ("class", "id", "role", "aria-label", "data-testid"):
+        attr = node.attrs.get(attr_name)
+        if not attr:
+            continue
+        if isinstance(attr, (list, tuple, set)):
+            for item in attr:
+                token = str(item).strip().lower()
+                if token:
+                    yield token
+        else:
+            token = str(attr).strip().lower()
+            if token:
+                yield token
+
+
+def _is_layout_container(node: Tag) -> bool:
+    tag_name = (node.name or "").lower() if isinstance(node, Tag) else ""
+    if tag_name in _LAYOUT_PARENT_NAMES:
+        return True
+    for token in _iter_attribute_tokens(node):
+        for keyword in _LAYOUT_ATTR_KEYWORDS:
+            if keyword in token:
+                return True
+    return False
+
+
+def _is_layout_ancestor(anchor: Tag, max_depth: int = 4) -> bool:
+    depth = 0
+    for parent in anchor.parents:
+        if not isinstance(parent, Tag):
+            continue
+        if _is_layout_container(parent):
+            return True
+        depth += 1
+        if depth >= max_depth:
+            break
+    return False
+
+
+def _sanitize_anchor_text(anchor: Tag) -> str:
+    return anchor.get_text(separator=" ", strip=True)
+
+
+def _match_documentation_keywords(text_lower: str, href_lower: str) -> list[str]:
+    matches: list[str] = []
+    for keyword in DOCUMENTATION_KEYWORDS:
+        lowered = keyword.lower()
+        if lowered in text_lower or lowered in href_lower:
+            matches.append(keyword)
+    return matches
+
+
+def _is_repo_navigation_link(resolved_url: str, anchor_text: str) -> bool:
+    try:
+        parsed = urlparse(resolved_url)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    if not host or host not in REPOSITORY_HOSTS:
+        return False
+    path_lower = (parsed.path or "").lower()
+    text_lower = anchor_text.strip().lower()
+    if text_lower in _REPO_NAV_TEXT:
+        return True
+    for prefix in _REPO_NAV_PATH_PREFIXES:
+        if path_lower == prefix or path_lower.startswith(prefix + "/"):
+            return True
+    return False
+
 
 PUBLICATION_HOST_KEYWORDS: tuple[str, ...] = (
     "doi.org",
@@ -490,21 +644,42 @@ def extract_metadata(html_content: str, base_url: str) -> dict[str, Any]:
     soup = BeautifulSoup(html_content, "html.parser")
     meta: dict[str, Any] = {}
     documentation: list[str] = []
+    documentation_seen: set[str] = set()
     repository: str | None = None
     found_keywords: set[str] = set()
 
     for anchor in soup.find_all("a", href=True):
         href = anchor["href"]
-        text = anchor.get_text().lower()
+        if not href:
+            continue
+        if href.startswith("#"):
+            continue
+
+        text_raw = _sanitize_anchor_text(anchor)
+        text_lower = text_raw.lower()
+        href_lower = href.lower()
         resolved = urljoin(base_url, href)
-        matching_keywords = [
-            keyword for keyword in DOCUMENTATION_KEYWORDS if keyword in text
-        ]
-        if matching_keywords:
-            documentation.append(resolved)
-            found_keywords.update(matching_keywords)
-        if any(host in href for host in REPOSITORY_HOSTS):
+
+        try:
+            resolved_host = urlparse(resolved).netloc.lower()
+        except Exception:
+            resolved_host = ""
+
+        if resolved_host in REPOSITORY_HOSTS and not repository:
             repository = resolved
+
+        matching_keywords = _match_documentation_keywords(text_lower, href_lower)
+
+        if _is_repo_navigation_link(resolved, text_raw):
+            continue
+
+        if _is_layout_ancestor(anchor) and not matching_keywords:
+            continue
+
+        if matching_keywords and resolved not in documentation_seen:
+            documentation.append(resolved)
+            documentation_seen.add(resolved)
+        found_keywords.update(keyword.lower() for keyword in matching_keywords)
 
     if documentation:
         meta["documentation"] = documentation
