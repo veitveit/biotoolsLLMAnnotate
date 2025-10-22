@@ -1,0 +1,26 @@
+{
+    "tool_name": "FixtureTool from LLM",
+    "homepage": " https://doi.org/10.1000/xyz ",
+    "publication_ids": [
+        " PMID:2468 ",
+        " 10.1000/xyz "
+    ],
+    "bio_subscores": {
+        "A1": 0.9,
+        "A2": 0.5,
+        "A3": 1.0,
+        "A4": 0.2,
+        "A5": 0.0,
+        "extra": 0.4
+    },
+    "documentation_subscores": {
+        "B1": 0.8,
+        "B2": 0.6,
+        "B3": 0.0,
+        "B4": 0.2,
+        "B5": 0.9
+    },
+    "concise_description": "Fixture summary.",
+    "rationale": "Fixture rationale.",
+    "confidence_score": 0.72
+}

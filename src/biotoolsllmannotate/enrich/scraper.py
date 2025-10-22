@@ -4,6 +4,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any
 
@@ -14,6 +15,12 @@ from requests import exceptions as requests_exc
 from urllib.parse import urljoin, urlparse
 
 from ..version import __version__
+from .utils import (
+    DOCUMENTATION_KEYWORDS,
+    FrameCrawlLimiter,
+    is_probable_publication_url,
+    match_documentation_keywords,
+)
 
 DEFAULT_USER_AGENT = f"biotoolsllmannotate/{__version__} (+https://github.com/ELIXIR-Belgium/biotoolsLLMAnnotate)"
 
@@ -22,6 +29,108 @@ DEFAULT_MAX_FRAME_FETCHES = 5
 DEFAULT_MAX_FRAME_DEPTH = 2
 
 _NUMERIC_STATUS_PATTERN = re.compile(r"^\s*(-?\d+)\s*$")
+
+
+@dataclass(frozen=True)
+class ScrapeSettings:
+    timeout: float
+    headers: dict[str, str]
+    max_bytes: int
+    max_frames: int
+    max_frame_depth: int
+
+
+@dataclass
+class FetchResult:
+    status: int | str | None
+    html: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class ScrapeError:
+    label: str
+    message: str | None = None
+    url: str | None = None
+    context: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"label": self.label}
+        if self.message:
+            data["message"] = self.message
+        if self.url:
+            data["url"] = self.url
+        if self.context:
+            data["context"] = dict(self.context)
+        return data
+
+
+@dataclass
+class ScrapeMetrics:
+    root_status: int | str | None = None
+    frame_fetches: int = 0
+    frame_successes: int = 0
+    frame_limit_reached: bool = False
+    frame_depth_limit_hit: bool = False
+    errors: list[ScrapeError] = field(default_factory=list)
+    _error_index: set[
+        tuple[str, str | None, str | None, tuple[tuple[str, Any], ...] | None]
+    ] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def add_error(
+        self,
+        label: str,
+        message: str | None = None,
+        *,
+        url: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        label = label.strip()
+        if not label:
+            return
+        normalized_message = _truncate_error(str(message)) if message else None
+        normalized_url = url.strip() if url else None
+        normalized_context = dict(context) if context else None
+        context_key: tuple[tuple[str, Any], ...] | None = None
+        if normalized_context:
+            context_key = tuple(
+                sorted(normalized_context.items(), key=lambda item: item[0])
+            )
+        key = (label, normalized_message, normalized_url, context_key)
+        if key in self._error_index:
+            return
+        self._error_index.add(key)
+        self.errors.append(
+            ScrapeError(
+                label=label,
+                message=normalized_message,
+                url=normalized_url,
+                context=normalized_context,
+            )
+        )
+
+    def to_error_list(self) -> list[dict[str, Any]]:
+        return [error.to_dict() for error in self.errors]
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "root_status": self.root_status,
+            "frame_fetches": self.frame_fetches,
+            "frame_successes": self.frame_successes,
+        }
+        if self.frame_limit_reached:
+            data["frame_limit_reached"] = True
+        if self.frame_depth_limit_hit:
+            data["frame_depth_limit_hit"] = True
+        errors = self.to_error_list()
+        if errors:
+            data["errors"] = errors
+        return data
 
 
 class ContentTooLargeError(Exception):
@@ -101,137 +210,6 @@ def _extract_html(response: requests.Response, *, max_bytes: int) -> str:
     content = _materialize_content(response, max_bytes=max_bytes)
     return _decode_html(content, response)
 
-
-DOCUMENTATION_KEYWORDS: tuple[str, ...] = (
-    # B1 – Documentation completeness
-    "doc",
-    "docs",
-    "documentation",
-    "manual",
-    "user manual",
-    "handbook",
-    "guide",
-    "usage guide",
-    "usage",
-    "how to",
-    "how-to",
-    "tutorial",
-    "walkthrough",
-    "quickstart",
-    "getting started",
-    "examples",
-    "example",
-    "sample",
-    "cookbook",
-    "reference",
-    "api reference",
-    "start here",
-    "first steps",
-    "example workflow",
-    "usage:",
-    "--help",
-    "cli",
-    "gui",
-    "web app",
-    "rest api",
-    "openapi",
-    "swagger",
-    "galaxy",
-    "shiny",
-    "streamlit",
-    "gradio",
-    # B2 – Installation pathways
-    "install",
-    "installation",
-    "setup",
-    "set up",
-    "pip install",
-    "pip3 install",
-    "conda install",
-    "mamba install",
-    "bioconda",
-    "bioconductor",
-    "cran",
-    "brew install",
-    "apt-get install",
-    "docker",
-    "dockerfile",
-    "docker pull",
-    "container",
-    "singularity",
-    "singularity recipe",
-    "apptainer",
-    "podman",
-    "biocontainers",
-    "ghcr.io",
-    "quay.io",
-    "requirements.txt",
-    "environment.yml",
-    "env.yaml",
-    "poetry.lock",
-    "pipfile",
-    "build",
-    "compile",
-    "binary",
-    "package",
-    # B3 – Reproducibility aids
-    "release",
-    "release date",
-    "latest release",
-    "releases",
-    "changelog",
-    "version",
-    "version history",
-    "tag",
-    "git tag",
-    "tags",
-    "doi",
-    "zenodo",
-    "license",
-    "mit",
-    "gpl",
-    "apache",
-    "bsd",
-    "archival",
-    "workflow",
-    "pipeline",
-    "makefile",
-    "test data",
-    "sample dataset",
-    "exact command",
-    "reproduce",
-    "replicate",
-    "benchmark",
-    # B4 – Maintenance signal
-    "updated",
-    "last updated",
-    "commit",
-    "recent commit",
-    "activity",
-    "roadmap",
-    "issue tracker",
-    "issues",
-    "open issues",
-    "closed issues",
-    "news",
-    "blog",
-    "maintained",
-    "supported",
-    "support",
-    "active",
-    # B5 – Onboarding & support
-    "help",
-    "faq",
-    "troubleshooting",
-    "contact",
-    "email",
-    "support@",
-    "community",
-    "forum",
-    "contributing",
-    "contribution guide",
-    "code of conduct",
-)
 
 REPOSITORY_HOSTS: tuple[str, ...] = (
     "github.com",
@@ -340,15 +318,6 @@ def _sanitize_anchor_text(anchor: Tag) -> str:
     return anchor.get_text(separator=" ", strip=True)
 
 
-def _match_documentation_keywords(text_lower: str, href_lower: str) -> list[str]:
-    matches: list[str] = []
-    for keyword in DOCUMENTATION_KEYWORDS:
-        lowered = keyword.lower()
-        if lowered in text_lower or lowered in href_lower:
-            matches.append(keyword)
-    return matches
-
-
 def _is_repo_navigation_link(resolved_url: str, anchor_text: str) -> bool:
     try:
         parsed = urlparse(resolved_url)
@@ -367,36 +336,6 @@ def _is_repo_navigation_link(resolved_url: str, anchor_text: str) -> bool:
     return False
 
 
-PUBLICATION_HOST_KEYWORDS: tuple[str, ...] = (
-    "doi.org",
-    "dx.doi.org",
-    "pubmed.ncbi.nlm.nih.gov",
-    "ncbi.nlm.nih.gov",
-    "link.springer.com",
-    "nature.com",
-    "sciencedirect.com",
-    "academic.oup.com",
-    "onlinelibrary.wiley.com",
-    "biomedcentral.com",
-    "journals.plos.org",
-    "frontiersin.org",
-    "researchgate.net",
-    "biorxiv.org",
-    "medrxiv.org",
-    "ieeexplore.ieee.org",
-    "dl.acm.org",
-    "jamanetwork.com",
-    "science.org",
-    "cell.com",
-    "hindawi.com",
-    "tandfonline.com",
-    "karger.com",
-    "spiedigitallibrary.org",
-    "iop.org",
-)
-
-_DOI_PATH_PATTERN = re.compile(r"/10\.[0-9]{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
-
 __all__ = [
     "DOCUMENTATION_KEYWORDS",
     "REPOSITORY_HOSTS",
@@ -406,29 +345,6 @@ __all__ = [
     "scrape_homepage_metadata",
     "is_probable_publication_url",
 ]
-
-
-def is_probable_publication_url(url: str | None) -> bool:
-    if not isinstance(url, str):
-        return False
-    candidate = url.strip()
-    if not candidate:
-        return False
-    try:
-        parsed = urlparse(candidate)
-    except Exception:
-        return False
-    host = (parsed.netloc or "").lower()
-    path = (parsed.path or "").lower()
-    if not host:
-        return False
-    if any(keyword in host for keyword in PUBLICATION_HOST_KEYWORDS):
-        return True
-    if host.endswith(".nih.gov") and ("pmc" in host or "/pmc" in path):
-        return True
-    if _DOI_PATH_PATTERN.search(path):
-        return True
-    return False
 
 
 def _candidate_homepage_urls(candidate: dict[str, Any]) -> list[str]:
@@ -456,6 +372,53 @@ def _candidate_homepage_urls(candidate: dict[str, Any]) -> list[str]:
         _add(extra)
 
     return urls
+
+
+def _build_scrape_settings(config: dict[str, Any] | None) -> ScrapeSettings:
+    cfg = config or {}
+
+    raw_timeout = cfg.get("timeout", 8)
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        timeout = 8.0
+    if timeout <= 0:
+        timeout = 8.0
+
+    user_agent = cfg.get("user_agent", DEFAULT_USER_AGENT) or DEFAULT_USER_AGENT
+    headers = {"User-Agent": str(user_agent)}
+
+    raw_max_bytes = cfg.get("max_bytes", DEFAULT_MAX_BYTES)
+    try:
+        max_bytes = int(raw_max_bytes)
+    except (TypeError, ValueError):
+        max_bytes = DEFAULT_MAX_BYTES
+    if max_bytes <= 0:
+        max_bytes = DEFAULT_MAX_BYTES
+
+    raw_max_frames = cfg.get("max_frames", DEFAULT_MAX_FRAME_FETCHES)
+    try:
+        max_frames = int(raw_max_frames)
+    except (TypeError, ValueError):
+        max_frames = DEFAULT_MAX_FRAME_FETCHES
+    if max_frames < 0:
+        max_frames = 0
+
+    raw_max_depth = cfg.get("max_frame_depth", DEFAULT_MAX_FRAME_DEPTH)
+    try:
+        max_frame_depth = int(raw_max_depth)
+    except (TypeError, ValueError):
+        max_frame_depth = DEFAULT_MAX_FRAME_DEPTH
+    if max_frame_depth < 0:
+        max_frame_depth = 0
+
+    return ScrapeSettings(
+        timeout=float(timeout),
+        headers=headers,
+        max_bytes=max_bytes,
+        max_frames=max_frames,
+        max_frame_depth=max_frame_depth,
+    )
 
 
 def _coerce_homepage_status(value: Any) -> int | str | None:
@@ -656,8 +619,6 @@ def extract_metadata(html_content: str, base_url: str) -> dict[str, Any]:
             continue
 
         text_raw = _sanitize_anchor_text(anchor)
-        text_lower = text_raw.lower()
-        href_lower = href.lower()
         resolved = urljoin(base_url, href)
 
         try:
@@ -668,7 +629,7 @@ def extract_metadata(html_content: str, base_url: str) -> dict[str, Any]:
         if resolved_host in REPOSITORY_HOSTS and not repository:
             repository = resolved
 
-        matching_keywords = _match_documentation_keywords(text_lower, href_lower)
+        matching_keywords = match_documentation_keywords(text_raw, href)
 
         if _is_repo_navigation_link(resolved, text_raw):
             continue
@@ -708,62 +669,115 @@ def _crawl_frames_for_metadata(
     root_url: str,
     *,
     session: requests.Session,
-    headers: dict[str, str],
-    timeout: float,
-    max_frames: int,
-    max_depth: int,
-    max_bytes: int,
+    settings: ScrapeSettings,
+    metrics: ScrapeMetrics | None,
     logger,
 ) -> dict[str, Any]:
-    if max_frames <= 0 or max_depth <= 0:
+    if settings.max_frames <= 0 or settings.max_frame_depth <= 0:
         return {}
 
     aggregated: dict[str, Any] = {}
     visited: set[str] = set()
     queue: deque[tuple[str, str, int]] = deque([(root_html, root_url, 0)])
-    fetched = 0
+    limiter = FrameCrawlLimiter(
+        max_frames=settings.max_frames,
+        max_depth=settings.max_frame_depth,
+    )
 
-    while queue and fetched < max_frames:
+    while queue and limiter.can_fetch_more():
         html, base_url, depth = queue.popleft()
-        if depth >= max_depth:
+        if not limiter.depth_allowed(depth):
+            if metrics:
+                metrics.frame_depth_limit_hit = True
             continue
-        for frame_url in _discover_frame_urls(html, base_url):
+
+        frame_urls = _discover_frame_urls(html, base_url)
+        if metrics and frame_urls and not limiter.depth_allowed(depth + 1):
+            metrics.frame_depth_limit_hit = True
+
+        for frame_url in frame_urls:
             if frame_url in visited:
                 continue
-            visited.add(frame_url)
-            if fetched >= max_frames:
+            if not limiter.can_fetch_more():
                 break
+            visited.add(frame_url)
             try:
-                response = session.get(frame_url, timeout=timeout, headers=headers)
-                fetched += 1
+                response = session.get(
+                    frame_url,
+                    timeout=settings.timeout,
+                    headers=settings.headers,
+                )
+                limiter.record_fetch()
+                if metrics:
+                    metrics.frame_fetches = limiter.fetches
                 if response.status_code >= 400:
                     logger.warning(
                         "SCRAPE frame %s failed with HTTP %s",
                         frame_url,
                         response.status_code,
                     )
+                    if metrics:
+                        metrics.add_error(
+                            "frame_http_error",
+                            f"HTTP {response.status_code}",
+                            url=frame_url,
+                            context={"status": response.status_code},
+                        )
                     continue
-                frame_html = _extract_html(response, max_bytes=max_bytes)
+                frame_html = _extract_html(response, max_bytes=settings.max_bytes)
             except ContentTooLargeError as exc:
                 logger.warning("SCRAPE frame %s skipped: %s", frame_url, exc)
+                if metrics:
+                    metrics.add_error(
+                        "frame_content_too_large",
+                        str(exc),
+                        url=frame_url,
+                    )
                 continue
             except NonHtmlContentError as exc:
                 logger.warning("SCRAPE frame %s skipped: %s", frame_url, exc)
+                if metrics:
+                    metrics.add_error(
+                        "frame_non_html",
+                        str(exc),
+                        url=frame_url,
+                    )
                 continue
             except Exception as exc:  # pragma: no cover - network specific failures
                 logger.warning("SCRAPE frame fetch failed for %s: %s", frame_url, exc)
+                if metrics:
+                    metrics.add_error(
+                        "frame_fetch_error",
+                        str(exc),
+                        url=frame_url,
+                    )
                 continue
 
             frame_meta = extract_metadata(frame_html, frame_url)
             if frame_meta:
+                if metrics:
+                    metrics.frame_successes += 1
                 aggregated = (
                     _merge_metadata(aggregated, frame_meta)
                     if aggregated
                     else dict(frame_meta)
                 )
 
-            if depth + 1 < max_depth:
-                queue.append((frame_html, frame_url, depth + 1))
+            next_depth = depth + 1
+            if limiter.depth_allowed(next_depth):
+                queue.append((frame_html, frame_url, next_depth))
+            elif metrics:
+                metrics.frame_depth_limit_hit = True
+
+        if not limiter.can_fetch_more():
+            break
+
+    if metrics:
+        metrics.frame_fetches = limiter.fetches
+        if limiter.limit_reached:
+            metrics.frame_limit_reached = True
+        if limiter.depth_limit_hit:
+            metrics.frame_depth_limit_hit = True
 
     return aggregated
 
@@ -816,6 +830,46 @@ def _merge_documentation(candidate: dict[str, Any], new_urls: Iterable[str]) -> 
         candidate["documentation"] = docs
 
 
+def _apply_scrape_metrics(candidate: dict[str, Any], metrics: ScrapeMetrics) -> None:
+    candidate["homepage_metrics"] = metrics.to_dict()
+    error_details = metrics.to_error_list()
+    if error_details:
+        candidate["homepage_error_details"] = error_details
+    else:
+        candidate.pop("homepage_error_details", None)
+
+
+def _fetch_homepage_html(
+    url: str,
+    *,
+    session: requests.Session,
+    settings: ScrapeSettings,
+    logger,
+) -> FetchResult:
+    try:
+        response = session.get(url, timeout=settings.timeout, headers=settings.headers)
+    except Exception as exc:  # pragma: no cover - network specific failures
+        status_label, message = _classify_homepage_exception(exc)
+        logger.warning("SCRAPE failed for %s: %s", url, exc)
+        return FetchResult(status=status_label, error=message or status_label)
+
+    status = response.status_code
+    if status >= 400:
+        logger.warning("SCRAPE skipped %s: HTTP %s", url, status)
+        return FetchResult(status=status, error=f"HTTP {status}")
+
+    try:
+        html = _extract_html(response, max_bytes=settings.max_bytes)
+    except ContentTooLargeError as exc:
+        logger.warning("SCRAPE skipped %s: %s", url, exc)
+        return FetchResult(status="content_too_large", error=str(exc))
+    except NonHtmlContentError as exc:
+        logger.warning("SCRAPE skipped %s: %s", url, exc)
+        return FetchResult(status="non_html_content", error=str(exc))
+
+    return FetchResult(status=status, html=html)
+
+
 def scrape_homepage_metadata(
     candidate: dict[str, Any],
     *,
@@ -825,9 +879,12 @@ def scrape_homepage_metadata(
 ) -> None:
     """Fetch homepage HTML and enrich candidate with documentation/repository links."""
     normalize_candidate_homepage(candidate)
-    cfg = config or {}
+    settings = _build_scrape_settings(config)
+    metrics = ScrapeMetrics()
     homepage_candidates = _candidate_homepage_urls(candidate)
     if not homepage_candidates:
+        candidate.pop("homepage_metrics", None)
+        candidate.pop("homepage_error_details", None)
         return
 
     homepage = homepage_candidates[0]
@@ -848,71 +905,37 @@ def scrape_homepage_metadata(
             candidate.pop("homepage_filtered_url", None)
             candidate["homepage_error"] = "filtered_publication_url"
             candidate["homepage_scraped"] = False
+            metrics.add_error("filtered_publication_url", url=homepage)
+            _apply_scrape_metrics(candidate, metrics)
             return
 
     if candidate.get("homepage") != homepage:
         candidate["homepage"] = homepage
 
-    timeout = cfg.get("timeout", 8)
-    headers = {"User-Agent": cfg.get("user_agent", DEFAULT_USER_AGENT)}
-    max_bytes = int(cfg.get("max_bytes", DEFAULT_MAX_BYTES))
-    if max_bytes <= 0:
-        max_bytes = DEFAULT_MAX_BYTES
-    max_frames = int(cfg.get("max_frames", DEFAULT_MAX_FRAME_FETCHES))
-    if max_frames < 0:
-        max_frames = 0
-    max_frame_depth = int(cfg.get("max_frame_depth", DEFAULT_MAX_FRAME_DEPTH))
-    if max_frame_depth < 0:
-        max_frame_depth = 0
-
     sess = session or requests.Session()
+    fetch = _fetch_homepage_html(
+        homepage, session=sess, settings=settings, logger=logger
+    )
+    metrics.root_status = fetch.status
+    candidate["homepage_status"] = fetch.status
 
-    try:
-        response = sess.get(homepage, timeout=timeout, headers=headers)
-    except (
-        Exception
-    ) as exc:  # pragma: no cover - network failures are environment-specific
-        status_label, message = _classify_homepage_exception(exc)
-        candidate["homepage_status"] = status_label
-        candidate["homepage_error"] = message or status_label
+    if fetch.html is None:
+        candidate["homepage_error"] = _truncate_error(fetch.error or str(fetch.status))
         candidate["homepage_scraped"] = False
-        logger.warning("SCRAPE failed for %s: %s", homepage, exc)
-        return
-
-    candidate["homepage_status"] = response.status_code
-    if response.status_code >= 400:
-        candidate["homepage_error"] = f"HTTP {response.status_code}"
-        candidate["homepage_scraped"] = False
-        return
-
-    try:
-        html = _extract_html(response, max_bytes=max_bytes)
-    except ContentTooLargeError as exc:
-        candidate["homepage_status"] = "content_too_large"
-        candidate["homepage_error"] = _truncate_error(str(exc))
-        candidate["homepage_scraped"] = False
-        logger.warning("SCRAPE skipped %s: %s", homepage, exc)
-        return
-    except NonHtmlContentError as exc:
-        candidate["homepage_status"] = "non_html_content"
-        candidate["homepage_error"] = _truncate_error(str(exc))
-        candidate["homepage_scraped"] = False
-        logger.warning("SCRAPE skipped %s: %s", homepage, exc)
+        if fetch.error:
+            metrics.add_error("root_fetch", fetch.error, url=homepage)
+        _apply_scrape_metrics(candidate, metrics)
         return
 
     candidate.pop("homepage_error", None)
-
-    meta = extract_metadata(html, homepage)
+    meta = extract_metadata(fetch.html, homepage)
 
     frame_meta = _crawl_frames_for_metadata(
-        html,
+        fetch.html,
         homepage,
         session=sess,
-        headers=headers,
-        timeout=timeout,
-        max_frames=max_frames,
-        max_depth=max_frame_depth,
-        max_bytes=max_bytes,
+        settings=settings,
+        metrics=metrics,
         logger=logger,
     )
     if frame_meta:
@@ -930,3 +953,4 @@ def scrape_homepage_metadata(
     else:
         candidate.pop("documentation_keywords", None)
     candidate["homepage_scraped"] = True
+    _apply_scrape_metrics(candidate, metrics)

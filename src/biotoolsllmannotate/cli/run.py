@@ -470,6 +470,7 @@ def write_report_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
                 }
             )
 
+
 DecisionCategory = Literal["add", "review", "do_not_add"]
 
 
@@ -1869,9 +1870,7 @@ def execute_run(
                     urls = [str(u) for u in (candidate.get("urls") or [])]
                     if not homepage:
                         homepage = (
-                            candidate.get("homepage")
-                            or primary_homepage(urls)
-                            or ""
+                            candidate.get("homepage") or primary_homepage(urls) or ""
                         )
                     homepage_status = candidate.get("homepage_status", homepage_status)
                     homepage_error = candidate.get("homepage_error", homepage_error)

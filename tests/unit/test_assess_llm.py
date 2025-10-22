@@ -1,5 +1,8 @@
 import os
 import sys
+import json
+from pathlib import Path
+import copy
 
 import pytest
 
@@ -8,6 +11,7 @@ sys.path.insert(
 )
 
 from biotoolsllmannotate.assess.scorer import Scorer, clamp_score
+from biotoolsllmannotate.config import DEFAULT_CONFIG_YAML
 from biotoolsllmannotate.enrich import normalize_candidate_homepage
 
 
@@ -67,6 +71,7 @@ def test_score_candidate_clamps_and_returns_rationale():
     assert result["concise_description"] == "Concise summary."
     assert result["origin_types"] == ["title", "description"]
     assert result["confidence_score"] == 1.0
+    assert result["model_params"] == {"attempts": 1, "schema_errors": []}
 
 
 class SubscoreClient:
@@ -121,6 +126,7 @@ def test_score_candidate_averages_subscores():
         "B5": 0.0,
     }
     assert result["confidence_score"] == pytest.approx(0.75)
+    assert result["model_params"] == {"attempts": 1, "schema_errors": []}
 
 
 class RetryClient:
@@ -181,6 +187,13 @@ def test_score_candidate_retries_on_schema_failure():
     )
     assert result["tool_name"] == "Retry Tool"
     assert result["homepage"] == "https://retry.example"
+    params = result["model_params"]
+    assert params["attempts"] == 2
+    assert params.get("prompt_augmented") is True
+    assert params["schema_errors"]
+    assert any(
+        "documentation_subscores.B5" in err for err in params["schema_errors"][0]
+    )
 
 
 class PublicationHomepageClient:
@@ -291,3 +304,48 @@ def test_build_prompt_includes_homepage_status_from_pub2tools_metadata():
     assert "Homepage: https://broken.example" in prompt
     assert "Homepage status: 404" in prompt
     assert "Homepage error: HTTP 404" in prompt
+
+
+TESTS_DIR = Path(__file__).resolve().parent.parent
+FIXTURES_DIR = TESTS_DIR / "fixtures"
+EXPECTED_DIR = FIXTURES_DIR / "expected"
+SCORING_DIR = FIXTURES_DIR / "scoring"
+
+
+def test_score_candidate_fixture_normalisation(tmp_path: Path) -> None:
+    cfg = copy.deepcopy(DEFAULT_CONFIG_YAML)
+    cfg.setdefault("ollama", {})["schema_retries"] = 0
+    cfg["ollama"]["model"] = "fixture-model"
+
+    response_payload = (SCORING_DIR / "ollama_response.json").read_text()
+    expected = json.loads((EXPECTED_DIR / "scorer_baseline_output.json").read_text())
+
+    class FixtureClient:
+        def __init__(self, payload: str) -> None:
+            self.payload = payload
+            self.calls = 0
+
+        def generate(self, prompt, model=None, temperature=None, top_p=None, seed=None):
+            self.calls += 1
+            return self.payload
+
+    scorer = Scorer(config=cfg)
+    fixture_client = FixtureClient(response_payload)
+    scorer.client = fixture_client
+    scorer.model = "fixture-model"
+
+    candidate = {
+        "title": "Fixture Tool",
+        "description": "Fixture description.",
+        "homepage": "https://fixture.example/tool",
+        "documentation": ["https://fixture.example/docs/guide.html"],
+        "repository": "https://github.com/example/fixture-tool",
+        "tags": ["omics"],
+        "published_at": "2024-12-01",
+        "publication_ids": ["PMID:0000"],
+    }
+
+    result = scorer.score_candidate(candidate)
+
+    assert fixture_client.calls == 1
+    assert result == expected

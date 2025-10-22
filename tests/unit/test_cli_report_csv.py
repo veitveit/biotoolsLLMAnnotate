@@ -385,8 +385,8 @@ def test_execute_run_filters_publication_homepage(
     execute_run(
         from_date="7d",
         to_date=None,
-    bio_thresholds=(0.5, 0.6),
-    doc_thresholds=(0.5, 0.6),
+        bio_thresholds=(0.5, 0.6),
+        doc_thresholds=(0.5, 0.6),
         limit=None,
         dry_run=True,
         concurrency=1,

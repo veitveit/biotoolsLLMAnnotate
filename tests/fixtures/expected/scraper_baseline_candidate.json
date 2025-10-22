@@ -1,0 +1,74 @@
+{
+    "documentation": [
+        {
+            "url": "https://fixture.example/old-doc"
+        },
+        {
+            "type": [
+                "Documentation"
+            ],
+            "url": "https://fixture.example/docs"
+        },
+        {
+            "type": [
+                "Documentation"
+            ],
+            "url": "https://fixture.example/docs/faq.html"
+        },
+        {
+            "type": [
+                "Documentation"
+            ],
+            "url": "https://fixture.example/docs/getting-started.html"
+        },
+        {
+            "type": [
+                "Documentation"
+            ],
+            "url": "https://fixture.example/docs/install.html"
+        },
+        {
+            "type": [
+                "Documentation"
+            ],
+            "url": "https://fixture.example/issues"
+        },
+        {
+            "type": [
+                "Documentation"
+            ],
+            "url": "https://fixture.example/support/faq.html"
+        },
+        {
+            "type": [
+                "Documentation"
+            ],
+            "url": "https://github.com/example/fixture-tool"
+        }
+    ],
+    "documentation_keywords": [
+        "doc",
+        "docs",
+        "documentation",
+        "example",
+        "faq",
+        "getting started",
+        "gui",
+        "guide",
+        "install",
+        "installation",
+        "issues",
+        "support",
+        "tutorial"
+    ],
+    "homepage": "https://fixture.example/tool",
+    "homepage_metrics": {
+        "frame_fetches": 1,
+        "frame_successes": 1,
+        "root_status": 200
+    },
+    "homepage_scraped": true,
+    "homepage_status": 200,
+    "repository": "https://github.com/example/fixture-tool",
+    "title": "FixtureTool"
+}

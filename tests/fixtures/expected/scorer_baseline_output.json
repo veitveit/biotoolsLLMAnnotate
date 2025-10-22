@@ -1,0 +1,45 @@
+{
+    "bio_score": 0.5,
+    "bio_subscores": {
+        "A1": 0.9,
+        "A2": 0.5,
+        "A3": 1.0,
+        "A4": 0.2,
+        "A5": 0.0,
+        "extra": 0.4
+    },
+    "concise_description": "Fixture summary.",
+    "confidence_score": 0.72,
+    "doc_score_v2": 0.6,
+    "documentation_score": 0.6,
+    "documentation_score_raw": 0.5,
+    "documentation_subscores": {
+        "B1": 0.8,
+        "B2": 0.6,
+        "B3": 0.0,
+        "B4": 0.2,
+        "B5": 0.9
+    },
+    "homepage": "https://fixture.example/tool",
+    "model": "fixture-model",
+    "model_params": {
+        "attempts": 1,
+        "schema_errors": []
+    },
+    "origin_types": [
+        "title",
+        "description",
+        "homepage",
+        "documentation",
+        "repository",
+        "tags",
+        "publication",
+        "publication_ids"
+    ],
+    "publication_ids": [
+        "PMID:2468",
+        "10.1000/xyz"
+    ],
+    "rationale": "Fixture rationale.",
+    "tool_name": "FixtureTool from LLM"
+}

@@ -1,5 +1,6 @@
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .ollama_client import OllamaClient, OllamaConnectionError
@@ -338,182 +339,50 @@ def _candidate_homepage(candidate: dict) -> str:
     return ""
 
 
-class Scorer:
-    def __init__(self, model=None, config=None):
-        self.config = config or get_config_yaml()
-        self.client = OllamaClient(config=self.config)
-        self.model = model or self.config.get("ollama", {}).get("model")
+@dataclass
+class RetryDiagnostics:
+    attempts: int
+    schema_errors: List[List[str]] = field(default_factory=list)
+    prompt_augmented: bool = False
 
-    def score_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
-        """Score a candidate using LLM with proper error handling."""
-        if not isinstance(candidate, dict):
-            raise ValueError("Candidate must be a dictionary")
-
-        if not candidate.get("title") and not candidate.get("name"):
-            raise ValueError("Candidate must have either 'title' or 'name' field")
-
-        base_prompt = self._build_prompt(candidate)
-        origin_types = self._origin_types(candidate)
-
-        raw_schema_retries = self.config.get("ollama", {}).get("schema_retries", 1)
-        try:
-            schema_retries = int(raw_schema_retries)
-        except (TypeError, ValueError):
-            schema_retries = 1
-        schema_retries = max(0, schema_retries)
-
-        attempts = 1 + schema_retries
-        response_payload: Optional[Dict[str, Any]] = None
-        last_errors: List[str] = []
-        successful_attempts: Optional[int] = None
-
-        for attempt in range(attempts):
-            prompt = (
-                base_prompt
-                if attempt == 0
-                else self._augment_prompt_with_errors(base_prompt, last_errors)
-            )
-            try:
-                raw_response = self.client.generate(prompt, model=self.model)
-            except OllamaConnectionError as e:
-                raise ValueError(f"LLM scoring failed: {e}") from e
-            except ValueError as e:
-                last_errors = [str(e)]
-                if attempt == attempts - 1:
-                    raise ValueError(
-                        "LLM scoring failed to produce valid JSON after retries"
-                    ) from e
-                continue
-
-            if isinstance(raw_response, str):
-                try:
-                    parsed_response = json.loads(raw_response)
-                except json.JSONDecodeError as exc:
-                    last_errors = [f"JSON parse error: {exc}"]
-                    if attempt == attempts - 1:
-                        raise ValueError(
-                            "LLM scoring produced invalid JSON after retries"
-                        ) from exc
-                    continue
-            elif isinstance(raw_response, Mapping):
-                parsed_response = dict(raw_response)
-            else:
-                last_errors = [
-                    f"Unexpected response type: {type(raw_response).__name__}"
-                ]
-                if attempt == attempts - 1:
-                    raise ValueError("LLM scoring returned an unexpected payload type")
-                continue
-
-            validation_errors = _schema_validation_errors(parsed_response)
-            if validation_errors:
-                last_errors = validation_errors
-                if attempt == attempts - 1:
-                    joined = "; ".join(validation_errors)
-                    raise ValueError(
-                        f"LLM scoring response violated schema after retries: {joined}"
-                    )
-                continue
-
-            response_payload = parsed_response
-            successful_attempts = attempt + 1
-            break
-
-        if response_payload is None:
-            raise ValueError("LLM scoring failed: empty response payload")
-
-        response = response_payload
-
-        output_pub_ids = response.get("publication_ids")
-        if isinstance(output_pub_ids, str):
-            publication_ids = [output_pub_ids]
-        elif isinstance(output_pub_ids, list):
-            publication_ids = [str(p).strip() for p in output_pub_ids if str(p).strip()]
-        else:
-            publication_ids = candidate.get("publication_ids", [])
-
-        bio_score, bio_breakdown = _score_from_response(
-            response,
-            ("bio_subscores", "bio_subcriteria", "bio_components"),
-            ("A1", "A2", "A3", "A4", "A5"),
-        )
-        doc_score, doc_breakdown = _score_from_response(
-            response,
-            (
-                "documentation_subscores",
-                "documentation_subcriteria",
-                "documentation_components",
-            ),
-            ("B1", "B2", "B3", "B4", "B5"),
-        )
-
-        homepage_value = ""
-        for option in (response.get("homepage"), _candidate_homepage(candidate)):
-            if isinstance(option, str):
-                stripped = option.strip()
-                if stripped and not is_probable_publication_url(stripped):
-                    homepage_value = stripped
-                    break
-
-        model_params: Dict[str, Any] = {}
-        if successful_attempts is not None:
-            model_params["attempts"] = successful_attempts
-
-        confidence_raw = response.get("confidence_score")
-        confidence_value = _coerce_float(confidence_raw)
-        if confidence_value is None:
-            confidence_value = 0.0
-        confidence_score = clamp_score(confidence_value)
-
-        result = {
-            "tool_name": response.get("tool_name")
-            or candidate.get("title")
-            or candidate.get("name", ""),
-            "homepage": homepage_value,
-            "publication_ids": publication_ids,
-            "bio_score": bio_score,
-            "documentation_score": doc_score,
-            "concise_description": response.get("concise_description", ""),
-            "rationale": response.get("rationale", ""),
-            "model": self.model,
-            "model_params": model_params,
-            "origin_types": origin_types,
-            "confidence_score": confidence_score,
+    def to_model_params(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "attempts": self.attempts,
+            "schema_errors": self.schema_errors,
         }
-        result["bio_subscores"] = bio_breakdown or {}
-        result["documentation_subscores"] = doc_breakdown or {}
-        doc_score_v2 = _documentation_score_v2(doc_breakdown, doc_score)
-        if doc_score_v2 != doc_score:
-            result["documentation_score_raw"] = doc_score
-        result["doc_score_v2"] = doc_score_v2
-        result["documentation_score"] = doc_score_v2
-        return result
+        if self.prompt_augmented:
+            data["prompt_augmented"] = True
+        return data
 
-    def _build_prompt(self, candidate: dict) -> str:
-        template = self.config.get("scoring_prompt_template")
+
+class PromptBuilder:
+    def __init__(self, config: Mapping[str, Any]):
+        self._config = config
+
+    def build(self, candidate: Mapping[str, Any]) -> str:
+        template = self._config.get("scoring_prompt_template")
         if not template:
             template = DEFAULT_CONFIG_YAML["scoring_prompt_template"]
 
         publication_ids = candidate.get("publication_ids") or []
         documentation_value = candidate.get("documentation")
-        documentation_list = []
+        documentation_list: List[str] = []
         if isinstance(documentation_value, str):
             documentation_list = [documentation_value]
         elif isinstance(documentation_value, Sequence) and not isinstance(
             documentation_value, str
         ):
             for item in documentation_value:
-                if isinstance(item, dict) and item.get("url"):
+                if isinstance(item, Mapping) and item.get("url"):
                     documentation_list.append(str(item["url"]))
-                elif not isinstance(item, dict):
+                elif not isinstance(item, Mapping):
                     documentation_list.append(str(item))
 
         tags_value = candidate.get("tags") or []
-        tags_str = (
-            ", ".join(str(tag) for tag in tags_value)
-            if isinstance(tags_value, Sequence) and not isinstance(tags_value, str)
-            else str(tags_value)
-        )
+        if isinstance(tags_value, Sequence) and not isinstance(tags_value, str):
+            tags_str = ", ".join(str(tag) for tag in tags_value)
+        else:
+            tags_str = str(tags_value) if tags_value else ""
 
         homepage_status = candidate.get("homepage_status")
         homepage_error = candidate.get("homepage_error")
@@ -530,7 +399,7 @@ class Scorer:
         else:
             documentation_keywords = "None"
 
-        prompt = _safe_fill_template(
+        return _safe_fill_template(
             template,
             {
                 "title": candidate.get("title", ""),
@@ -552,11 +421,9 @@ class Scorer:
                 "json_schema": JSON_RESPONSE_SCHEMA,
             },
         )
-        return prompt
 
-    def _augment_prompt_with_errors(
-        self, base_prompt: str, errors: Sequence[str]
-    ) -> str:
+    @staticmethod
+    def augment(base_prompt: str, errors: Sequence[str]) -> str:
         bullet_list = "\n".join(f"- {error}" for error in errors)
         return (
             f"{base_prompt}\n\n"
@@ -565,10 +432,9 @@ class Scorer:
             "Respond again with a corrected JSON object that satisfies every rule."
         )
 
-    def _origin_types(self, candidate: dict) -> list[str]:
-        """Return labels describing which candidate fields populated the prompt."""
-
-        def has_value(value) -> bool:
+    @staticmethod
+    def origin_types(candidate: Mapping[str, Any]) -> List[str]:
+        def has_value(value: Any) -> bool:
             if value is None:
                 return False
             if isinstance(value, str):
@@ -590,8 +456,295 @@ class Scorer:
             ("publication_full_text_url", "publication_full_text_url"),
             ("publication_ids", "publication_ids"),
         ]
-        origins: list[str] = []
+        origins: List[str] = []
         for key, label in mapping:
             if has_value(candidate.get(key)):
                 origins.append(label)
         return origins
+
+
+class SchemaValidator:
+    def validate(self, payload: Any) -> List[str]:
+        return _schema_validation_errors(payload)
+
+
+class LLMRetryManager:
+    def __init__(
+        self,
+        client: OllamaClient,
+        model: Optional[str],
+        validator: SchemaValidator,
+        schema_retries: int,
+    ) -> None:
+        self._client = client
+        self._model = model
+        self._validator = validator
+        self._max_attempts = max(1, 1 + schema_retries)
+
+    def run(
+        self, base_prompt: str, prompt_builder: PromptBuilder
+    ) -> Tuple[Dict[str, Any], RetryDiagnostics]:
+        errors_history: List[List[str]] = []
+        last_errors: List[str] = []
+
+        for attempt_index in range(self._max_attempts):
+            prompt = (
+                base_prompt
+                if attempt_index == 0
+                else prompt_builder.augment(base_prompt, last_errors)
+            )
+            try:
+                raw_response = self._client.generate(prompt, model=self._model)
+            except OllamaConnectionError as exc:
+                raise ValueError(f"LLM scoring failed: {exc}") from exc
+            except ValueError as exc:
+                last_errors = [str(exc)]
+                errors_history.append(last_errors.copy())
+                if attempt_index == self._max_attempts - 1:
+                    raise ValueError(
+                        "LLM scoring failed to produce valid JSON after retries"
+                    ) from exc
+                continue
+
+            parsed_response, parse_error, parse_exc = self._coerce_to_mapping(
+                raw_response
+            )
+            if parse_error:
+                last_errors = [parse_error]
+                errors_history.append(last_errors.copy())
+                if attempt_index == self._max_attempts - 1:
+                    message = "LLM scoring produced invalid JSON after retries"
+                    if parse_exc is not None:
+                        raise ValueError(message) from parse_exc
+                    raise ValueError(message)
+                continue
+
+            validation_errors = self._validator.validate(parsed_response)
+            if validation_errors:
+                last_errors = validation_errors
+                errors_history.append(validation_errors.copy())
+                if attempt_index == self._max_attempts - 1:
+                    joined = "; ".join(validation_errors)
+                    raise ValueError(
+                        f"LLM scoring response violated schema after retries: {joined}"
+                    )
+                continue
+
+            diagnostics = RetryDiagnostics(
+                attempts=attempt_index + 1,
+                schema_errors=errors_history.copy(),
+                prompt_augmented=attempt_index > 0 and bool(errors_history),
+            )
+            return parsed_response, diagnostics
+
+        raise ValueError("LLM scoring failed: empty response payload")
+
+    @staticmethod
+    def _coerce_to_mapping(
+        raw_response: Any,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str], Optional[Exception]]:
+        if isinstance(raw_response, Mapping):
+            return dict(raw_response), None, None
+        if isinstance(raw_response, str):
+            try:
+                return json.loads(raw_response), None, None
+            except json.JSONDecodeError as exc:
+                return None, f"JSON parse error: {exc}", exc
+        return None, f"Unexpected response type: {type(raw_response).__name__}", None
+
+
+@dataclass
+class ScoreBreakdown:
+    score: float
+    breakdown: Dict[str, float]
+
+
+@dataclass
+class DocumentationScore(ScoreBreakdown):
+    raw: float = 0.0
+
+
+class ScoreNormalizer:
+    def __init__(self, response: Mapping[str, Any], candidate: Mapping[str, Any]):
+        self._response = response
+        self._candidate = candidate
+
+    def bio(self) -> ScoreBreakdown:
+        score, breakdown = _score_from_response(
+            self._response,
+            ("bio_subscores", "bio_subcriteria", "bio_components"),
+            _BIO_KEYS,
+        )
+        return ScoreBreakdown(
+            score=score,
+            breakdown=self._coerce_breakdown_dict(breakdown, _BIO_KEYS),
+        )
+
+    def documentation(self) -> DocumentationScore:
+        raw_score, breakdown = _score_from_response(
+            self._response,
+            (
+                "documentation_subscores",
+                "documentation_subcriteria",
+                "documentation_components",
+            ),
+            _DOC_KEYS,
+        )
+        breakdown_dict = self._coerce_breakdown_dict(breakdown, _DOC_KEYS)
+        weighted = _documentation_score_v2(breakdown_dict, raw_score)
+        return DocumentationScore(
+            score=weighted,
+            breakdown=breakdown_dict,
+            raw=raw_score,
+        )
+
+    def confidence(self) -> float:
+        confidence_value = _coerce_float(self._response.get("confidence_score"))
+        if confidence_value is None:
+            confidence_value = 0.0
+        return clamp_score(confidence_value)
+
+    def publication_ids(self) -> List[str]:
+        raw_publications = self._response.get("publication_ids")
+        publications: List[str] = []
+        if isinstance(raw_publications, str):
+            stripped = raw_publications.strip()
+            if stripped:
+                publications = [stripped]
+        elif isinstance(raw_publications, Sequence):
+            publications = [
+                str(item).strip() for item in raw_publications if str(item).strip()
+            ]
+
+        if not publications:
+            fallback = self._candidate.get("publication_ids") or []
+            publications = [str(item).strip() for item in fallback if str(item).strip()]
+        return publications
+
+    def homepage(self) -> str:
+        for option in (
+            self._response.get("homepage"),
+            _candidate_homepage(self._candidate),
+        ):
+            if isinstance(option, str):
+                stripped = option.strip()
+                if stripped and not is_probable_publication_url(stripped):
+                    return stripped
+        return ""
+
+    def tool_name(self) -> str:
+        return (
+            self._response.get("tool_name")
+            or self._candidate.get("title")
+            or self._candidate.get("name", "")
+        )
+
+    def concise_description(self) -> str:
+        return self._response.get("concise_description", "")
+
+    def rationale(self) -> str:
+        return self._response.get("rationale", "")
+
+    @staticmethod
+    def _coerce_breakdown_dict(
+        breakdown: Union[Mapping[str, Any], Sequence[Any], None],
+        canonical_order: Sequence[str],
+    ) -> Dict[str, float]:
+        if isinstance(breakdown, Mapping):
+            result: Dict[str, float] = {}
+            for key in canonical_order:
+                value = _coerce_float(breakdown.get(key))
+                result[key] = float(value) if value is not None else 0.0
+            for extra_key, extra_value in breakdown.items():
+                if extra_key in result:
+                    continue
+                coerced = _coerce_float(extra_value)
+                if coerced is not None:
+                    result[str(extra_key)] = float(coerced)
+            return result
+        if isinstance(breakdown, Sequence) and not isinstance(breakdown, (str, bytes)):
+            result = {}
+            for idx, key in enumerate(canonical_order):
+                value = _coerce_float(breakdown[idx]) if idx < len(breakdown) else None
+                result[key] = float(value) if value is not None else 0.0
+            return result
+        return {key: 0.0 for key in canonical_order}
+
+
+class Scorer:
+    def __init__(self, model=None, config=None):
+        self.config = config or get_config_yaml()
+        self.client = OllamaClient(config=self.config)
+        self.model = model or self.config.get("ollama", {}).get("model")
+        self.prompt_builder = PromptBuilder(self.config)
+        self._schema_validator = SchemaValidator()
+
+    def score_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
+        """Score a candidate using LLM with proper error handling."""
+        if not isinstance(candidate, dict):
+            raise ValueError("Candidate must be a dictionary")
+
+        if not candidate.get("title") and not candidate.get("name"):
+            raise ValueError("Candidate must have either 'title' or 'name' field")
+
+        base_prompt = self._build_prompt(candidate)
+        origin_types = self._origin_types(candidate)
+
+        retry_manager = LLMRetryManager(
+            client=self.client,
+            model=self.model,
+            validator=self._schema_validator,
+            schema_retries=self._schema_retries(),
+        )
+        response_payload, diagnostics = retry_manager.run(
+            base_prompt, self.prompt_builder
+        )
+
+        normalizer = ScoreNormalizer(response_payload, candidate)
+        bio_score = normalizer.bio()
+        documentation_score = normalizer.documentation()
+
+        model_params = diagnostics.to_model_params()
+
+        result = {
+            "tool_name": normalizer.tool_name(),
+            "homepage": normalizer.homepage(),
+            "publication_ids": normalizer.publication_ids(),
+            "bio_score": bio_score.score,
+            "documentation_score": documentation_score.score,
+            "concise_description": normalizer.concise_description(),
+            "rationale": normalizer.rationale(),
+            "model": self.model,
+            "model_params": model_params,
+            "origin_types": origin_types,
+            "confidence_score": normalizer.confidence(),
+        }
+
+        result["bio_subscores"] = bio_score.breakdown
+        result["documentation_subscores"] = documentation_score.breakdown
+
+        if documentation_score.raw != documentation_score.score:
+            result["documentation_score_raw"] = documentation_score.raw
+        result["doc_score_v2"] = documentation_score.score
+        result["documentation_score"] = documentation_score.score
+
+        return result
+
+    def _schema_retries(self) -> int:
+        raw_schema_retries = self.config.get("ollama", {}).get("schema_retries", 1)
+        try:
+            schema_retries = int(raw_schema_retries)
+        except (TypeError, ValueError):
+            schema_retries = 1
+        return max(0, schema_retries)
+
+    def _build_prompt(self, candidate: dict) -> str:
+        return self.prompt_builder.build(candidate)
+
+    def _augment_prompt_with_errors(
+        self, base_prompt: str, errors: Sequence[str]
+    ) -> str:
+        return self.prompt_builder.augment(base_prompt, errors)
+
+    def _origin_types(self, candidate: dict) -> list[str]:
+        return PromptBuilder.origin_types(candidate)

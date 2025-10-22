@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
+
+TESTS_DIR = Path(__file__).resolve().parent.parent
+FIXTURES_DIR = TESTS_DIR / "fixtures"
+EXPECTED_DIR = FIXTURES_DIR / "expected"
+HTML_DIR = FIXTURES_DIR / "html"
 
 
 def test_extract_metadata_from_html(tmp_path: Path) -> None:
@@ -202,6 +208,10 @@ def test_scrape_homepage_clears_stale_error() -> None:
     assert candidate.get("homepage_status") == 200
     assert "homepage_error" not in candidate
     assert candidate.get("homepage_scraped") is True
+    metrics = candidate.get("homepage_metrics") or {}
+    assert metrics.get("root_status") == 200
+    assert metrics.get("frame_fetches", 0) >= 0
+    assert "homepage_error_details" not in candidate
     keywords = candidate.get("documentation_keywords") or []
     assert {"doc", "documentation"}.issubset(set(keywords))
 
@@ -336,6 +346,67 @@ def test_scrape_homepage_skips_publication_link() -> None:
     assert candidate.get("homepage") is None
     assert "homepage_filtered_url" not in candidate
     assert candidate.get("homepage_error") == "filtered_publication_url"
+    metrics = candidate.get("homepage_metrics") or {}
+    assert metrics.get("root_status") is None
+    details = candidate.get("homepage_error_details") or []
+    assert details
+    first_error = details[0]
+    assert first_error.get("label") == "filtered_publication_url"
+    assert first_error.get("url") == "https://doi.org/10.1000/example"
+    assert metrics.get("errors") == details
+
+
+def test_scrape_homepage_metadata_baseline(tmp_path: Path) -> None:
+    """Full scrape uses fixtures to confirm metadata footprint."""
+    from biotoolsllmannotate.enrich.scraper import scrape_homepage_metadata
+
+    root_html = (HTML_DIR / "scraper_baseline_root.html").read_text()
+    frame_html = (HTML_DIR / "scraper_baseline_frame.html").read_text()
+    expected = json.loads(
+        (EXPECTED_DIR / "scraper_baseline_candidate.json").read_text()
+    )
+
+    class DummyResponse:
+        def __init__(self, text: str) -> None:
+            self.status_code = 200
+            self.headers = {"Content-Type": "text/html"}
+            self.encoding = "utf-8"
+            self.content = text.encode("utf-8")
+
+    class FixtureSession:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def get(
+            self, url: str, timeout: float | int, headers: dict[str, str]
+        ) -> DummyResponse:
+            self.calls.append(url)
+            if url == "https://fixture.example/tool":
+                return DummyResponse(root_html)
+            if url == "https://fixture.example/embedded/install.html":
+                return DummyResponse(frame_html)
+            raise AssertionError(f"Unexpected URL requested: {url}")
+
+    class SilentLogger:
+        def warning(
+            self, *args: Any, **kwargs: Any
+        ) -> None:  # pragma: no cover - no warnings expected
+            raise AssertionError(f"Unexpected warning: {args}")
+
+    candidate = {
+        "title": "FixtureTool",
+        "homepage": "https://fixture.example/tool",
+        "documentation": ["https://fixture.example/old-doc"],
+    }
+
+    scrape_homepage_metadata(
+        candidate,
+        config={"max_frames": 3},
+        logger=SilentLogger(),
+        session=FixtureSession(),
+    )
+
+    assert candidate == expected
 
 
 def test_scrape_homepage_records_connection_error() -> None:
@@ -370,6 +441,83 @@ def test_scrape_homepage_records_connection_error() -> None:
     assert candidate.get("homepage_scraped") is False
     assert "documentation" not in candidate
     assert candidate.get("documentation_keywords") is None
+    metrics = candidate.get("homepage_metrics") or {}
+    assert metrics.get("root_status") == "connection_error"
+    details = candidate.get("homepage_error_details") or []
+    assert details
+    first_error = details[0]
+    assert first_error.get("label") == "root_fetch"
+    assert "DNS failure" in (first_error.get("message") or "")
+    assert first_error.get("url") == "https://missing.example"
+    assert metrics.get("errors") == details
+
+
+def test_scrape_homepage_records_frame_limit() -> None:
+    """Frame crawl respects max_frames and records telemetry flags."""
+    from biotoolsllmannotate.enrich.scraper import scrape_homepage_metadata
+
+    root_html = """
+    <html>
+        <body>
+            <iframe src="/frame-one.html"></iframe>
+            <iframe src="/frame-two.html"></iframe>
+        </body>
+    </html>
+    """.strip()
+
+    frame_html = """
+    <html>
+        <body>
+            <a href="/docs">Docs</a>
+        </body>
+    </html>
+    """.strip()
+
+    class DummyResponse:
+        def __init__(self, text: str) -> None:
+            self.status_code = 200
+            self.headers = {"Content-Type": "text/html"}
+            self.encoding = "utf-8"
+            self.content = text.encode("utf-8")
+
+    class FixtureSession:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def get(
+            self, url: str, timeout: float | int, headers: dict[str, str]
+        ) -> DummyResponse:
+            self.calls.append(url)
+            if url == "https://fixture.example/tool":
+                return DummyResponse(root_html)
+            if url in (
+                "https://fixture.example/frame-one.html",
+                "https://fixture.example/frame-two.html",
+            ):
+                return DummyResponse(frame_html)
+            raise AssertionError(f"Unexpected URL requested: {url}")
+
+    class SilentLogger:
+        def warning(self, *args: Any, **kwargs: Any) -> None:
+            raise AssertionError(f"Unexpected warning: {args}")
+
+    candidate = {
+        "homepage": "https://fixture.example/tool",
+    }
+
+    scrape_homepage_metadata(
+        candidate,
+        config={"max_frames": 1},
+        logger=SilentLogger(),
+        session=FixtureSession(),
+    )
+
+    metrics = candidate.get("homepage_metrics") or {}
+    assert metrics.get("frame_fetches") == 1
+    assert metrics.get("frame_limit_reached") is True
+    assert metrics.get("frame_successes") == 1
+    assert not metrics.get("errors")
+    assert candidate.get("homepage_error_details") is None
 
 
 def test_scrape_homepage_prefers_non_publication_url() -> None:

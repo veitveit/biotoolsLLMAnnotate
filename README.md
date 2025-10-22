@@ -110,6 +110,18 @@ The selected folder contains:
 | `logs/ollama.log` | Append-only log of all LLM scoring prompts and responses |
 | `config.generated.yaml` or `<original-config>.yaml` | Snapshot of the configuration used for the run |
 
+### LLM telemetry
+
+Each record in `reports/assessment.jsonl` carries a `model_params` object describing how the LLM behaved during scoring. Key fields include:
+
+| Field | Meaning |
+| --- | --- |
+| `attempts` | Number of prompt/response cycles the scorer performed (minimum 1) |
+| `schema_errors` | Ordered list of validation errors returned by the JSON schema validator for each failed attempt |
+| `prompt_augmented` | `true` when the scorer appended schema error feedback to the prompt before retrying |
+
+These diagnostics mirror the telemetry requirement captured in OpenSpec and help correlate downstream decisions with LLM stability. Consumers that previously ignored `model_params` should update their parsers to accommodate the new keys.
+
 ### Confidence calibration
 
 The LLM now follows an explicit rubric when emitting the `confidence_score` field. Expect values near 0.9–1.0 only when every subcriterion is backed by clear evidence from multiple sources; mixed or inferred evidence should land around 0.3–0.8, and scarce/conflicting evidence should drop to 0.0–0.2. Review the prompt template (either in `config.yaml` or your custom config) for the full guidance and adjust it further if your use case calls for a different calibration.
