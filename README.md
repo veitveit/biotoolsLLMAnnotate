@@ -8,14 +8,13 @@ CLI tools for discovering, enriching, and annotating bio.tools entries with help
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
   - [Core settings](#core-settings)
-  - [Coming soon: Pub2Tools guide](#coming-soon-pub2tools-guide)
-  - [Coming soon: Europe PMC tips](#coming-soon-europe-pmc-tips)
 - [Running the Pipeline](#running-the-pipeline)
 - [Generated Outputs](#generated-outputs)
 - [Resume & Caching](#resume--caching)
 - [Troubleshooting & Tips](#troubleshooting--tips)
 - [Development](#development)
 - [License](#license)
+- [Documentation](#documentation)
 
 ## Overview
 - Fetch candidate records from Pub2Tools exports or existing JSON files.
@@ -23,6 +22,10 @@ CLI tools for discovering, enriching, and annotating bio.tools entries with help
 - Score bioinformatics relevance and documentation quality using an Ollama model.
 - Produce strict biotoolsSchema payloads plus human-readable assessment reports.
 - Resume any stage (gather, enrich, score) using cached artifacts to accelerate iteration.
+
+## Documentation
+- [Architecture and Data Flow](docs/architecture.md)
+- [Configuration Manual](CONFIG.md)
 
 ## Installation
 ```bash
@@ -34,19 +37,19 @@ ollama pull llama3.2  # optional, only needed for LLM scoring
 
 > Need defaults? Generate a starter configuration with:
 > ```bash
-> python -m biotoolsllmannotate --write-default-config
+> biotoolsannotate --write-default-config
 > ```
 
 ## Quick Start
 ```bash
 # Dry-run against sample data (no network calls)
-python -m biotoolsllmannotate --input tests/fixtures/pub2tools/sample.json --dry-run
+biotoolsannotate --input tests/fixtures/pub2tools/sample.json --dry-run
 
 # Fetch fresh candidates from the last 7 days and score them
-python -m biotoolsllmannotate --from-date 7d --min-score 0.6
+biotoolsannotate --from-date 7d --min-score 0.6
 
 # Re-run only the scoring step with cached enrichment
-python -m biotoolsllmannotate --resume-from-enriched --resume-from-scoring --dry-run
+biotoolsannotate --resume-from-enriched --resume-from-scoring --dry-run
 ```
 
 ## Configuration
@@ -65,32 +68,26 @@ Configuration is YAML-driven. The CLI loads `config.yaml` from the project root 
 | Concurrency | `ollama.concurrency` | `--concurrency` | Controls parallel scoring workers |
 | Logging | `logging.level`, `logging.file` | `--verbose`, `--quiet` | Flags override log level; file path set in config |
 
-### Coming soon: Pub2Tools guide
-Detailed guidance for configuring Pub2Tools (wrapper usage, environment variables, and advanced fetch options) will be documented here in an upcoming update.
-
-### Coming soon: Europe PMC tips
-A focused walkthrough for Europe PMC enrichment settings—including performance trade-offs and offline strategies—will be published here soon.
-
 ## Running the Pipeline
 Common invocations:
 ```bash
 # Custom date window
-python -m biotoolsllmannotate --from-date 2024-01-01 --to-date 2024-03-31
+biotoolsannotate --from-date 2024-01-01 --to-date 2024-03-31
 
 # Offline mode (no network scraping or Europe PMC requests)
-python -m biotoolsllmannotate --offline
+biotoolsannotate --offline
 
 # Start from local candidates and separate registry snapshot
-python -m biotoolsllmannotate --input data/candidates.json --registry data/biotools_snapshot.json --offline
+biotoolsannotate --input data/candidates.json --registry data/biotools_snapshot.json --offline
 
 # Limit the number of candidates processed
-python -m biotoolsllmannotate --limit 25
+biotoolsannotate --limit 25
 
 # Point to a specific config file
-python -m biotoolsllmannotate --config myconfig.yaml
+biotoolsannotate --config myconfig.yaml
 ```
 
-Use `python -m biotoolsllmannotate --help` to explore all available flags, including concurrency settings, progress display, and resume options.
+Use `biotoolsannotate --help` to explore all available flags, including concurrency settings, progress display, and resume options.
 
 ## Generated Outputs
 Each run writes artifacts to one of the following folders:

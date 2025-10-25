@@ -42,6 +42,33 @@ flowchart LR
     end
 ```
 
+## Run Lifecycle
+```mermaid
+stateDiagram-v2
+  [*] --> LoadConfig
+  LoadConfig: Load configuration file and defaults
+  DetermineInput: Resolve candidate source (resume, input, Pub2Tools)
+  Gather: Gather and normalise raw candidates
+  Deduplicate: Merge EDAM tags and collapse duplicates
+  Enrich: Scrape homepages and enrich publications
+  Score: Run LLM or heuristic scorer
+  Output: Emit payloads and reports
+  CacheArtifacts: Persist resume checkpoints
+
+  LoadConfig --> DetermineInput
+  DetermineInput --> Gather
+  Gather --> Deduplicate
+  Deduplicate --> Enrich
+  Enrich --> Score
+  Score --> Output
+  Output --> CacheArtifacts
+  CacheArtifacts --> [*]
+
+  Gather --> CacheArtifacts: --resume-from-pub2tools
+  Enrich --> CacheArtifacts: --resume-from-enriched
+  Score --> CacheArtifacts: --resume-from-scoring
+```
+
 ## Module Collaboration
 ```mermaid
 classDiagram
@@ -97,6 +124,31 @@ classDiagram
     ScoreNormalizer <-- Scorer
     FrameCrawlLimiter <-- scrape_homepage_metadata
     ScrapeMetrics <-- scrape_homepage_metadata
+```
+
+## Stage Coordination Sequence
+```mermaid
+sequenceDiagram
+  participant User
+  participant CLI as CLI Runner
+  participant Pipeline as Pipeline Controller
+  participant Gather as Gather Stage
+  participant Enrich as Enrichment Stage
+  participant Score as Scoring Stage
+  participant Output as Output Stage
+
+  User->>CLI: biotoolsannotate [flags]
+  CLI->>Pipeline: load_config()
+  Pipeline->>Gather: resolve_candidates()
+  Gather-->>Pipeline: candidates, provenance
+  Pipeline->>Enrich: scrape_and_merge()
+  Enrich-->>Pipeline: enriched candidates + metrics
+  Pipeline->>Score: score_candidates()
+  Score-->>Pipeline: assessment rows (LLM/heuristic)
+  Pipeline->>Output: write_reports()
+  Output-->>Pipeline: payload manifests
+  Pipeline-->>CLI: run summary + telemetry
+  CLI-->>User: exit code, console report
 ```
 
 ## Key Notes
