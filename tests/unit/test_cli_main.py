@@ -3,6 +3,7 @@ import os
 import sys
 from pathlib import Path
 
+import click
 import yaml
 from typer.testing import CliRunner
 
@@ -38,6 +39,7 @@ def test_conflicting_resume_and_input_exits_with_message(tmp_path):
 
     assert result.exit_code == 2
     output = result.output or ""
+    output = click.utils.strip_ansi(output)
     assert "Invalid value for --resume-from-pub2tools" in output
     assert "pipeline.input_path" in output
     assert "Traceback" not in output
