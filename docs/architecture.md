@@ -26,8 +26,7 @@ flowchart LR
     end
 
     subgraph Score
-        Cache --> ScoreOne["ThreadPoolExecutor\nscore_one()
- -- offline? --> HeuristicScorer"]
+        Cache --> ScoreOne["ThreadPoolExecutor\nscore_one()"]
         ScoreOne -->|LLM healthy| LLMScorer["Scorer (Ollama)"]
         ScoreOne -->|offline/LLM failure| HeuristicScorer["Heuristic scoring"]
         LLMScorer --> Reports

@@ -34,6 +34,52 @@ ul.task-list li input[type="checkbox"] {
 <link href="architecture_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
 <link href="architecture_files/libs/bootstrap/bootstrap.min.css" rel="stylesheet" id="quarto-bootstrap" data-mode="light">
 
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  window.addEventListener("DOMContentLoaded", function () {
+    if (!window.mermaid) {
+      return;
+    }
+
+    const convertPreToMermaid = (preEl) => {
+      if (!preEl) {
+        return null;
+      }
+      const codeEl = preEl.querySelector("code");
+      const diagramText = (codeEl ? codeEl.textContent : preEl.textContent || "").trim();
+      const container = document.createElement("div");
+      container.className = "mermaid";
+      container.textContent = diagramText;
+      preEl.replaceWith(container);
+      return container;
+    };
+
+    const mermaidBlocks = [];
+    document.querySelectorAll("pre.mermaid").forEach((pre) => {
+      const rendered = convertPreToMermaid(pre);
+      if (rendered) {
+        mermaidBlocks.push(rendered);
+      }
+    });
+
+    document.querySelectorAll("pre > code.language-mermaid").forEach((code) => {
+      const pre = code.parentElement;
+      if (pre && !pre.classList.contains("processed-mermaid")) {
+        pre.classList.add("processed-mermaid");
+        const rendered = convertPreToMermaid(pre);
+        if (rendered) {
+          mermaidBlocks.push(rendered);
+        }
+      }
+    });
+
+    window.mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
+    if (mermaidBlocks.length > 0) {
+      window.mermaid.run({ querySelector: ".mermaid" });
+    }
+  });
+</script>
+
 
 </head>
 
@@ -72,21 +118,46 @@ ul.task-list li input[type="checkbox"] {
         EuropePMC --&gt; Cache["cache/enriched_candidates.json.gz"]
     end
 
-    subgraph Score
-        Cache --&gt; ScoreOne["ThreadPoolExecutor\nscore_one()
- -- offline? --&gt; HeuristicScorer"]
-        ScoreOne --&gt;|LLM healthy| LLMScorer["Scorer (Ollama)"]
-        ScoreOne --&gt;|offline/LLM failure| HeuristicScorer["Heuristic scoring"]
-        LLMScorer --&gt; Reports
-        HeuristicScorer --&gt; Reports
-    end
+  subgraph Score
+    Cache --&gt; ScoreOne["ThreadPoolExecutor\nscore_one()"]
+    ScoreOne --&gt;|LLM healthy| LLMScorer["Scorer (Ollama)"]
+    ScoreOne --&gt;|offline/LLM failure| HeuristicScorer["Heuristic scoring"]
+    LLMScorer --&gt; Reports
+    HeuristicScorer --&gt; Reports
+  end
 
-    subgraph Output
-        Reports["reports/assessment.jsonl + .csv"] --&gt; Decisions["decision rows"]
-        Decisions --&gt; PayloadAdd["exports/biotools_payload.json"]
-        Decisions --&gt; PayloadReview["exports/biotools_review_payload.json"]
-        Decisions --&gt; Entries["exports/biotools_entries.json"]
-    end</code></pre>
+  subgraph Output
+    Reports["reports/assessment.jsonl + .csv"] --&gt; Decisions["decision rows"]
+    Decisions --&gt; PayloadAdd["exports/biotools_payload.json"]
+    Decisions --&gt; PayloadReview["exports/biotools_review_payload.json"]
+    Decisions --&gt; Entries["exports/biotools_entries.json"]
+  end</code></pre>
+</section>
+<section id="run-lifecycle" class="level2">
+<h2 class="anchored" data-anchor-id="run-lifecycle">Run Lifecycle</h2>
+<pre class="mermaid"><code>stateDiagram-v2
+  [*] --&gt; LoadConfig
+  LoadConfig: Load configuration file and defaults
+  DetermineInput: Resolve candidate source (resume, input, Pub2Tools)
+  Gather: Gather and normalise raw candidates
+  Deduplicate: Merge EDAM tags and collapse duplicates
+  Enrich: Scrape homepages and enrich publications
+  Score: Run LLM or heuristic scorer
+  Output: Emit payloads and reports
+  CacheArtifacts: Persist resume checkpoints
+
+  LoadConfig --&gt; DetermineInput
+  DetermineInput --&gt; Gather
+  Gather --&gt; Deduplicate
+  Deduplicate --&gt; Enrich
+  Enrich --&gt; Score
+  Score --&gt; Output
+  Output --&gt; CacheArtifacts
+  CacheArtifacts --&gt; [*]
+
+  Gather --&gt; CacheArtifacts: --resume-from-pub2tools
+  Enrich --&gt; CacheArtifacts: --resume-from-enriched
+  Score --&gt; CacheArtifacts: --resume-from-scoring</code></pre>
 </section>
 <section id="module-collaboration" class="level2">
 <h2 class="anchored" data-anchor-id="module-collaboration">Module Collaboration</h2>
@@ -143,6 +214,30 @@ ul.task-list li input[type="checkbox"] {
     ScoreNormalizer &lt;-- Scorer
     FrameCrawlLimiter &lt;-- scrape_homepage_metadata
     ScrapeMetrics &lt;-- scrape_homepage_metadata</code></pre>
+</section>
+<section id="stage-coordination-sequence" class="level2">
+<h2 class="anchored" data-anchor-id="stage-coordination-sequence">Stage Coordination Sequence</h2>
+<pre class="mermaid"><code>sequenceDiagram
+  participant User
+  participant CLI as CLI Runner
+  participant Pipeline as Pipeline Controller
+  participant Gather as Gather Stage
+  participant Enrich as Enrichment Stage
+  participant Score as Scoring Stage
+  participant Output as Output Stage
+
+  User-&gt;&gt;CLI: biotoolsannotate [flags]
+  CLI-&gt;&gt;Pipeline: load_config()
+  Pipeline-&gt;&gt;Gather: resolve_candidates()
+  Gather--&gt;&gt;Pipeline: candidates, provenance
+  Pipeline-&gt;&gt;Enrich: scrape_and_merge()
+  Enrich--&gt;&gt;Pipeline: enriched candidates + metrics
+  Pipeline-&gt;&gt;Score: score_candidates()
+  Score--&gt;&gt;Pipeline: assessment rows (LLM/heuristic)
+  Pipeline-&gt;&gt;Output: write_reports()
+  Output--&gt;&gt;Pipeline: payload manifests
+  Pipeline--&gt;&gt;CLI: run summary + telemetry
+  CLI--&gt;&gt;User: exit code, console report</code></pre>
 </section>
 <section id="key-notes" class="level2">
 <h2 class="anchored" data-anchor-id="key-notes">Key Notes</h2>
