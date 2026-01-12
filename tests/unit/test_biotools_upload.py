@@ -284,17 +284,17 @@ def test_write_upload_report_csv(tmp_path):
     assert rows[0]["bio_tools_url"] == "https://bio.tools/api/tool/tool-one"
     assert rows[0]["error"] == ""
 
-    # Check failed entry has no URL but has error
+    # Check failed entry with validation error has no URL but has error
     assert rows[1]["biotoolsID"] == "tool-two"
     assert rows[1]["status"] == "failed"
     assert rows[1]["bio_tools_url"] == ""
     assert "Validation error" in rows[1]["error"]
     assert rows[1]["response_code"] == "400"
 
-    # Check skipped entry has no URL
+    # Check skipped entry (already exists) still gets a URL
     assert rows[2]["biotoolsID"] == "tool-three"
     assert rows[2]["status"] == "skipped"
-    assert rows[2]["bio_tools_url"] == ""
+    assert rows[2]["bio_tools_url"] == "https://bio.tools/api/tool/tool-three"
     assert "already exists" in rows[2]["error"]
 
     # Check second uploaded entry also has URL
