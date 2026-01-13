@@ -682,6 +682,7 @@ def to_entry(
             "homepage_status",
             "homepage_error",
             "enrichment_context",
+            "confidence_flag",  # internal QA hint
         ):
             entry[key] = value
 

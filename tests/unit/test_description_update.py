@@ -78,3 +78,18 @@ def test_to_entry_fallback_empty_concise_description():
 
     # Verify original description is kept when concise_description is empty
     assert entry["description"] == "Original description"
+
+
+def test_to_entry_strips_confidence_flag():
+    """Ensure internal confidence hints are removed from outgoing payloads."""
+
+    candidate = {
+        "name": "TestTool",
+        "homepage": "https://example.com",
+        "biotoolsID": "testtool",
+        "confidence_flag": "high",
+    }
+
+    entry = to_entry(candidate, "https://example.com", None)
+
+    assert "confidence_flag" not in entry
