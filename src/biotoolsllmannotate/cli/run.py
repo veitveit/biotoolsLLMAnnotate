@@ -685,6 +685,9 @@ def to_entry(
         ):
             entry[key] = value
 
+    # Remove internal confidence metadata that bio.tools does not accept
+    entry.pop("confidence_flag", None)
+
     # Ensure required fields are present
     # Prioritize tool_name from scores (assessment.csv), then fall back to candidate data
     name = (
@@ -2524,6 +2527,9 @@ def execute_run(
                 if manual_decision:
                     # Use manual override
                     decision_value = manual_decision
+                    logger.debug(
+                        f"Using manual_decision='{decision_value}' for {row.get('id')} ({row.get('title')})"
+                    )
                 else:
                     # Calculate decision from scores
                     decision_value = classify_candidate(
@@ -2531,6 +2537,9 @@ def execute_run(
                         bio_thresholds=bio_thresholds,
                         doc_thresholds=doc_thresholds,
                         has_homepage=homepage_ok,
+                    )
+                    logger.debug(
+                        f"Calculated decision='{decision_value}' for {row.get('id')} ({row.get('title')})"
                     )
 
                 row["homepage"] = homepage
@@ -2568,6 +2577,9 @@ def execute_run(
                 report_rows.append(row)
 
                 if decision_value == "add":
+                    logger.debug(
+                        f"Adding to payload_add: {row.get('id')} ({row.get('title')}) - decision='{decision_value}' manual='{manual_decision}'"
+                    )
                     payload_add.append(to_entry(candidate, homepage, scores))
                     add_records.append((candidate, scores, homepage))
                 elif decision_value == "review":
