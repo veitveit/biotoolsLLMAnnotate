@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import gzip
 import json
+import logging
 import os
 import re
 import shutil
@@ -1815,7 +1816,33 @@ def execute_run(
         console_kwargs.update(force_terminal=True, force_interactive=True)
     console = Console(**console_kwargs)
 
-    setup_logging(console=console)
+    def _coerce_log_level(raw: Any) -> int | None:
+        if raw is None:
+            return None
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return None
+            if text.isdigit():
+                try:
+                    return int(text)
+                except ValueError:
+                    return None
+            mapped = getattr(logging, text.upper(), None)
+            if isinstance(mapped, int):
+                return mapped
+        return None
+
+    logging_cfg = config_data.get("logging")
+    if not isinstance(logging_cfg, dict):
+        logging_cfg = {}
+    env_level = _coerce_log_level(os.environ.get("BIOTOOLS_LOG_LEVEL"))
+    config_level = _coerce_log_level(logging_cfg.get("level"))
+    log_level = env_level or config_level or logging.INFO
+
+    setup_logging(level=log_level, console=console)
     logger = get_logger("pipeline")
 
     registry: BioToolsRegistry | None = None
